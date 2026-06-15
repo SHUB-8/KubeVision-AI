@@ -1,0 +1,101 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: beyla
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: beyla
+rules:
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "nodes"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: beyla
+subjects:
+  - kind: ServiceAccount
+    name: beyla
+    namespace: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: beyla
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: beyla
+  namespace: monitoring
+  labels:
+    app: beyla
+spec:
+  selector:
+    app: beyla
+  ports:
+    - name: metrics
+      port: 8999
+      targetPort: 8999
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: beyla
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: beyla
+  endpoints:
+    - port: metrics
+      interval: 15s
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: beyla
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: beyla
+  template:
+    metadata:
+      labels:
+        app: beyla
+    spec:
+      hostPID: true
+      serviceAccountName: beyla
+      containers:
+        - name: beyla
+          image: grafana/beyla:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: BEYLA_PROMETHEUS_PORT
+              value: "8999"
+            - name: BEYLA_KUBE_METADATA_ENABLE
+              value: "true"
+            - name: BEYLA_DISCOVERY_NAMESPACE
+              value: "boutique"
+          ports:
+            - containerPort: 8999
+              name: metrics
+          volumeMounts:
+            - mountPath: /var/run/
+              name: var-run
+      volumes:
+        - name: var-run
+          hostPath:
+            path: /var/run/
