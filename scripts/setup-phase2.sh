@@ -26,10 +26,13 @@ helm upgrade --install loki grafana/loki \
   --set loki.auth_enabled=false \
   --set loki.commonConfig.replication_factor=1 \
   --set loki.storage.type=filesystem \
-  --set singleBinary.replicas=1
+  --set singleBinary.replicas=1 \
+  --set read.replicas=0 \
+  --set write.replicas=0 \
+  --set backend.replicas=0
 
 echo "--- Installing Fluent Bit ---"
-# Deployed with our custom values to ship logs to Loki
+# Deployed with custom values to ship logs to Loki
 helm upgrade --install fluent-bit fluent/fluent-bit \
   --namespace monitoring \
   -f deploy/k8s/collection/fluent-bit-values.yaml
