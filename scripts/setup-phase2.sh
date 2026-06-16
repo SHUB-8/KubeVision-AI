@@ -26,6 +26,7 @@ helm upgrade --install loki grafana/loki \
   --set loki.auth_enabled=false \
   --set loki.commonConfig.replication_factor=1 \
   --set loki.storage.type=filesystem \
+  --set loki.useTestSchema=true \
   --set singleBinary.replicas=1 \
   --set read.replicas=0 \
   --set write.replicas=0 \
