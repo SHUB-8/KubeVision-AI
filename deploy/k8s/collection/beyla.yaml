@@ -83,6 +83,9 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
+            capabilities:
+              add:
+                - SYS_ADMIN
           env:
             - name: BEYLA_PROMETHEUS_PORT
               value: "8999"
@@ -90,6 +93,8 @@ spec:
               value: "true"
             - name: BEYLA_DISCOVERY_NAMESPACE
               value: ".*"
+            - name: BEYLA_OPEN_PORT
+              value: "80,8080,3550,50051"
             - name: BEYLA_SERVICE_GRAPH_ENABLE
               value: "true"
             - name: BEYLA_PRINT_TRACES
