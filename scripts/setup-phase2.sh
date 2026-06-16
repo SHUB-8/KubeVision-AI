@@ -42,5 +42,12 @@ helm upgrade --install fluent-bit fluent/fluent-bit \
   --namespace monitoring \
   -f deploy/k8s/collection/fluent-bit-values.yaml
 
+echo "--- Deploying Grafana Tempo ---"
+kubectl apply -f deploy/k8s/collection/tempo.yaml
+
 echo "--- Deploying Grafana Beyla ---"
 kubectl apply -f deploy/k8s/collection/beyla.yaml
+
+echo "--- Restarting Beyla to apply trace exporting ---"
+kubectl rollout restart ds beyla -n monitoring
+
