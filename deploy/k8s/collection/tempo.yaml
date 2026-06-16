@@ -6,7 +6,7 @@ metadata:
   namespace: monitoring
 data:
   tempo.yaml: |
-    stream_over_http: true
+    multitenancy_enabled: false
     server:
       http_listen_port: 3200
     distributor:
@@ -18,10 +18,14 @@ data:
             http:
               endpoint: "0.0.0.0:4318"
     ingester:
+      lifecycler:
+        address: 127.0.0.1
+        ring:
+          kvstore:
+            store: inmemory
+          replication_factor: 1
+        final_sleep: 0s
       max_block_duration: 5m
-    compactor:
-      compaction:
-        compaction_interval: 30s
     storage:
       trace:
         backend: local
@@ -47,7 +51,7 @@ spec:
     spec:
       containers:
         - name: tempo
-          image: grafana/tempo:latest
+          image: grafana/tempo:2.4.1
           args:
             - "-config.file=/etc/tempo/tempo.yaml"
           ports:
