@@ -90,6 +90,8 @@ spec:
               value: "true"
             - name: BEYLA_DISCOVERY_NAMESPACE
               value: "boutique"
+            - name: BEYLA_EXECUTABLE_NAME
+              value: ".*"
           ports:
             - containerPort: 8999
               name: metrics
