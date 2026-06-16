@@ -107,6 +107,8 @@ spec:
               value: "true"
             - name: BEYLA_INTERNAL_METRICS
               value: "true"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://tempo.monitoring.svc.cluster.local:4318"
             - name: BEYLA_EXECUTABLE_NAME
               value: ".*"
           ports:
