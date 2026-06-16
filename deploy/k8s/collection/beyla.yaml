@@ -93,15 +93,19 @@ spec:
               value: "true"
             - name: BEYLA_DISCOVERY_NAMESPACE
               value: ".*"
-            - name: BEYLA_OPEN_PORT
-              value: "80,8080,3550,50051"
             - name: BEYLA_SERVICE_GRAPH_ENABLE
               value: "true"
             - name: BEYLA_PRINT_TRACES
               value: "true"
+            - name: BEYLA_NETWORK_REGISTRATION
+              value: "true"
+            - name: BEYLA_NETWORK_METRICS
+              value: "true"
             - name: BEYLA_PROMETHEUS_REPORT_TARGET
               value: "true"
             - name: BEYLA_PROMETHEUS_REPORT_PEER
+              value: "true"
+            - name: BEYLA_INTERNAL_METRICS
               value: "true"
             - name: BEYLA_EXECUTABLE_NAME
               value: ".*"
@@ -113,6 +117,10 @@ spec:
               name: var-run
             - mountPath: /sys/fs/bpf
               name: bpffs
+            - mountPath: /sys/kernel/debug
+              name: sys-debug
+            - mountPath: /sys/kernel/security
+              name: sys-security
       volumes:
         - name: var-run
           hostPath:
@@ -121,3 +129,9 @@ spec:
           hostPath:
             path: /sys/fs/bpf
             type: DirectoryOrCreate
+        - name: sys-debug
+          hostPath:
+            path: /sys/kernel/debug
+        - name: sys-security
+          hostPath:
+            path: /sys/kernel/security
