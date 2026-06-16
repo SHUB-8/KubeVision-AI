@@ -20,6 +20,7 @@ helm upgrade --install prometheus prometheus-community/kube-prometheus-stack \
 
 echo "--- Installing Loki ---"
 # Configured in Single Binary mode with local filesystem storage
+# Disabled caches to save RAM (prevents 10GB memory request)
 helm upgrade --install loki grafana/loki \
   --namespace monitoring \
   --set deploymentMode=SingleBinary \
@@ -28,6 +29,9 @@ helm upgrade --install loki grafana/loki \
   --set loki.storage.type=filesystem \
   --set loki.useTestSchema=true \
   --set singleBinary.replicas=1 \
+  --set memcached.enabled=false \
+  --set resultsCache.enabled=false \
+  --set chunksCache.enabled=false \
   --set read.replicas=0 \
   --set write.replicas=0 \
   --set backend.replicas=0
