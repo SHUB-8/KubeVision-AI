@@ -42,15 +42,13 @@
 - **Stage 1:** Isolation Forest — fast anomaly screening (score > 0.75)
 - **Confidence gate:** Score > 0.92 fast-tracks past LSTM
 - **Stage 2:** LSTM Autoencoder — temporal verification (reconstruction error z-score)
-- **Parallel:** Prophet forecasting (CronJob, every 5–15 min)
+- **Parallel:** Prophet forecasting — continuous Forecaster service (long-running Deployment). Pulls metric history from Prometheus on a schedule, fits/updates Prophet models, and pushes forecasts to the Go Hub for storage in BadgerDB.
 
-### Go Backend Hub
+### Go Hub (Backend + Gateway, single binary)
 - **Aggregation:** Consolidates data from Prometheus, Loki, Tempo, and K8s API.
 - **Persistence:** Uses embedded BadgerDB for state, configuration, and incident history.
 - **Service Logic:** Manages historical baselines and proxies tracing/metric queries to the UI.
-
-### Go Anomaly Gateway
-Validate → Deduplicate (Redis TTL) → Rate-limit → Prioritize → Push to Redis Stream.
+- **Gateway module (`internal/gateway`):** Validate → Deduplicate (Redis TTL) → Rate-limit → Prioritize → Push to Redis Stream. Runs in the same process as the backend but kept as a decoupled module so it can be extracted later if event volume ever requires independent scaling.
 
 ### LangGraph Agents (Hybrid Supervisor)
 - Orchestrator fans out to 4 parallel subagents (Metrics, Log, K8s Event, Network).
@@ -75,8 +73,8 @@ Validate → Deduplicate (Redis TTL) → Rate-limit → Prioritize → Push to R
 | Logs | Fluent Bit → Loki | C / Go |
 | Metrics | Prometheus | Go |
 | Traces | Grafana Tempo | Go |
-| ML | scikit-learn (IF) + PyTorch (LSTM) + Prophet | Python |
-| Gateway | Custom Go service | Go |
+| ML | scikit-learn (IF) + PyTorch (LSTM) + Prophet (continuous service) | Python |
+| Hub | Custom Go service (Backend + Gateway in one binary) | Go |
 | Queue | Redis Streams + KEDA | C / Go |
 | Agents | LangGraph (Hybrid Supervisor) | Python |
 | Backend | Go + embedded BadgerDB | Go |
