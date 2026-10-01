@@ -55,12 +55,29 @@ export const ServiceNode = memo(({ data, selected }: NodeProps<any>) => {
     <div
       className={`group relative w-60 rounded-md bg-slate-900/95 border p-4 transition-all duration-200 cursor-pointer ${borderColor}`}
     >
+      {/* Target Handles (incoming) */}
       <Handle
+        id="target-left"
+        type="target"
+        position={Position.Left}
+        className="!bg-cyan-400 !w-2.5 !h-2.5 !border-slate-950"
+      />
+      <Handle
+        id="target-top"
         type="target"
         position={Position.Top}
         className="!bg-cyan-400 !w-2.5 !h-2.5 !border-slate-950"
       />
+
+      {/* Source Handles (outgoing) */}
       <Handle
+        id="source-right"
+        type="source"
+        position={Position.Right}
+        className="!bg-indigo-400 !w-2.5 !h-2.5 !border-slate-950"
+      />
+      <Handle
+        id="source-bottom"
         type="source"
         position={Position.Bottom}
         className="!bg-indigo-400 !w-2.5 !h-2.5 !border-slate-950"
