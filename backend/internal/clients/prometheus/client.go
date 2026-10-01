@@ -164,6 +164,25 @@ func (c *Client) GetRPCClientMetrics(namespace, window string) (json.RawMessage,
 	return c.Query(context.Background(), query)
 }
 
+// GetClientLatencyByEdge returns p95 latency for each client->server interaction edge
+func (c *Client) GetClientLatencyByEdge(namespace, window, quantile string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(rpc_client_call_duration_seconds_bucket{k8s_namespace_name="%s"}[%s])) by (le, service_name, server_address))`, quantile, namespace, window)
+	return c.Query(context.Background(), query)
+}
+
+// GetClientLatencyByServer returns p95 latency for each target server address as observed by its callers
+func (c *Client) GetClientLatencyByServer(namespace, window, quantile string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(rpc_client_call_duration_seconds_bucket{k8s_namespace_name="%s"}[%s])) by (le, server_address))`, quantile, namespace, window)
+	return c.Query(context.Background(), query)
+}
+
+// GetClientErrorsByEdge returns the error rate for each client->server interaction edge
+func (c *Client) GetClientErrorsByEdge(namespace, window string) (json.RawMessage, error) {
+	total := fmt.Sprintf(`sum(rate(rpc_client_call_duration_seconds_count{k8s_namespace_name="%s"}[%s])) by (service_name, server_address)`, namespace, window)
+	errors := fmt.Sprintf(`sum(rate(rpc_client_call_duration_seconds_count{k8s_namespace_name="%s",rpc_response_status_code!="OK"}[%s])) by (service_name, server_address)`, namespace, window)
+	return c.Query(context.Background(), fmt.Sprintf(`(%s) / (%s)`, errors, total))
+}
+
 // GetNetworkFlows returns eBPF network flow rates targeting the namespace (bytes/sec)
 func (c *Client) GetNetworkFlows(namespace, window string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`sum(rate(beyla_network_flow_bytes_total{k8s_dst_namespace="%s"}[%s])) by (k8s_src_owner_name, k8s_dst_owner_name, direction)`, namespace, window)

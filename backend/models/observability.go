@@ -1,21 +1,25 @@
 package models
 
 type Node struct {
-	ID        string            `json:"id"`
-	Label     string            `json:"label"`
-	Type      string            `json:"type"`
-	Namespace string            `json:"namespace"`
-	Protocol  string            `json:"protocol,omitempty"`
-	Labels    map[string]string `json:"labels,omitempty"`
+	ID         string            `json:"id"`
+	Label      string            `json:"label"`
+	Type       string            `json:"type"`
+	Namespace  string            `json:"namespace"`
+	Protocol   string            `json:"protocol,omitempty"`
+	Rate       float64           `json:"rate,omitempty"`
+	ErrorRate  float64           `json:"errorRate,omitempty"`
+	LatencyP95 float64           `json:"latencyP95,omitempty"`
+	Labels     map[string]string `json:"labels,omitempty"`
 }
 
 type Edge struct {
-	ID        string  `json:"id"`
-	Source    string  `json:"source"`
-	Target    string  `json:"target"`
-	Protocol  string  `json:"protocol,omitempty"`
-	Rate      float64 `json:"rate,omitempty"`
-	ErrorRate float64 `json:"errorRate,omitempty"`
+	ID         string  `json:"id"`
+	Source     string  `json:"source"`
+	Target     string  `json:"target"`
+	Protocol   string  `json:"protocol,omitempty"`
+	Rate       float64 `json:"rate,omitempty"`
+	ErrorRate  float64 `json:"errorRate,omitempty"`
+	LatencyP95 float64 `json:"latencyP95,omitempty"`
 }
 
 type Topology struct {

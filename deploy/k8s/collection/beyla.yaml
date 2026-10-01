@@ -82,6 +82,18 @@ data:
     discovery:
       instrument:
         - k8s_namespace: boutique
+    routes:
+      unmatched: heuristic
+      ignore_mode: all
+      ignored_patterns:
+        - /_healthz
+        - /healthz
+        - /health
+        - /live
+        - /ready
+        - /grpc.health.v1.Health/*
+        - /grpc.health.v1.Health/Check
+        - .*health.*
 ---
 apiVersion: apps/v1
 kind: DaemonSet

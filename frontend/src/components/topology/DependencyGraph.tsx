@@ -227,10 +227,9 @@ export const DependencyGraph: React.FC = () => {
             label: node.label || node.id,
             type: node.type,
             namespace: node.namespace || activeNamespace,
-            protocol: node.protocol || '',
-            rate: svc?.rate || 0,
-            errorRate: svc?.errorRate || 0,
-            latencyP95: svc?.latencyP95 || 0,
+            rate: node.rate || svc?.rate || 0,
+            errorRate: node.errorRate ?? svc?.errorRate ?? 0,
+            latencyP95: node.latencyP95 || svc?.latencyP95 || 0,
             status: svc?.status || 'Running',
             replicas: svc?.replicas || 1,
             ready: svc?.ready || 1,
@@ -245,8 +244,13 @@ export const DependencyGraph: React.FC = () => {
         let edgeLabel = '';
         if (edge.inferred) {
           edgeLabel = 'static map';
-        } else if (edge.rate && edge.rate > 0) {
-          edgeLabel = `${edge.rate.toFixed(1)} req/s`;
+        } else {
+          const parts: string[] = [];
+          if (edge.protocol) parts.push(edge.protocol);
+          if (edge.rate && edge.rate > 0) parts.push(`${edge.rate.toFixed(1)} req/s`);
+          if (edge.latencyP95 && edge.latencyP95 > 0) parts.push(`${(edge.latencyP95 * 1000).toFixed(1)}ms`);
+          if (edge.errorRate && edge.errorRate > 0) parts.push(`${(edge.errorRate * 100).toFixed(1)}% err`);
+          edgeLabel = parts.join(' • ');
         }
 
         return {
@@ -263,16 +267,18 @@ export const DependencyGraph: React.FC = () => {
           },
           label: edgeLabel,
           labelStyle: {
-            fill: edge.inferred ? '#8b98ad' : hasErrors ? '#f8a199' : '#b6c2d4',
-            fontSize: 12,
-            fontFamily: '"IBM Plex Mono", monospace',
-            fontWeight: 500,
+            fill: edge.inferred ? '#8b98ad' : hasErrors ? '#f8a199' : '#38bdf8',
+            fontSize: 11,
+            fontFamily: '"IBM Plex Mono", "JetBrains Mono", monospace',
+            fontWeight: 600,
           },
           labelBgStyle: {
-            fill: 'var(--color-slate-950)',
-            fillOpacity: 0.9,
+            fill: '#090d16',
+            fillOpacity: 0.95,
+            stroke: hasErrors ? '#f43f5e' : '#1e293b',
+            strokeWidth: 1,
           },
-          labelBgPadding: [6, 2],
+          labelBgPadding: [6, 3],
           labelBgBorderRadius: 4,
           markerEnd: {
             type: MarkerType.ArrowClosed,

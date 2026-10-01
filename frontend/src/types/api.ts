@@ -12,6 +12,9 @@ export interface Node {
   type: string;
   namespace: string;
   protocol?: string;
+  rate?: number;
+  errorRate?: number;
+  latencyP95?: number;
   labels?: Record<string, string>;
 }
 
@@ -22,6 +25,7 @@ export interface Edge {
   protocol?: string;
   rate?: number;
   errorRate?: number;
+  latencyP95?: number;
   /** True on links from the static fallback map (no peer telemetry). */
   inferred?: boolean;
 }

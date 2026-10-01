@@ -66,7 +66,7 @@ export const ServiceNode = memo(({ data, selected }: NodeProps<any>) => {
         className="!bg-indigo-400 !w-2.5 !h-2.5 !border-slate-950"
       />
 
-      {/* Top row: Icon, Name & Protocol Badge */}
+      {/* Top row: Name & Pods / Status Badge */}
       <div className="flex items-start justify-between gap-2 mb-2">
         <div className="flex items-center overflow-hidden">
           <span className="font-semibold text-sm text-slate-100 truncate tracking-tight" title={nodeData.label}>
@@ -74,24 +74,23 @@ export const ServiceNode = memo(({ data, selected }: NodeProps<any>) => {
           </span>
         </div>
 
-        {nodeData.protocol && (
-          <span className={`text-[11px] uppercase font-mono px-1.5 py-0.5 rounded border font-semibold ${badgeColor}`}>
-            {nodeData.protocol}
-          </span>
-        )}
+        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-slate-700/80 bg-slate-800/80 text-slate-300 font-medium flex items-center gap-1 shrink-0">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+          {nodeData.ready ?? 1}/{nodeData.replicas ?? 1}
+        </span>
       </div>
 
       {/* Bottom metrics row */}
       <div className="grid grid-cols-2 gap-2 pt-2.5 border-t border-slate-800/80 text-sm font-mono">
         <div title={hasTelemetry ? undefined : noDataHint}>
-          <span className="text-slate-400 text-[11px] block">RATE</span>
+          <span className="text-slate-400 text-[10px] uppercase block tracking-wider">Inbound Req</span>
           <span className={`font-medium ${hasTelemetry ? 'text-slate-200' : 'text-slate-500'}`}>
             {formatRate(nodeData.rate)}
           </span>
         </div>
 
         <div className="text-right" title={hasTelemetry ? undefined : noDataHint}>
-          <span className="text-slate-400 text-[11px] block">P95 LATENCY</span>
+          <span className="text-slate-400 text-[10px] uppercase block tracking-wider">P95 Latency</span>
           <span
             className={`font-medium ${
               !hasTelemetry ? 'text-slate-500' : isHighLatency ? 'text-amber-400' : 'text-slate-200'

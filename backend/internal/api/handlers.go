@@ -179,6 +179,16 @@ func (h *Handlers) GetServices(c *gin.Context) {
 				}
 			}
 		}
+		// For polyglot services whose server-side uprobes are not captured natively,
+		// use the client-observed latency targeting their service address.
+		if data, err := h.promClient.GetClientLatencyByServer(namespace, window, "0.95"); err == nil {
+			for _, r := range parseMetricEntries(data) {
+				serverAddr := r.Metric["server_address"]
+				if svc, ok := serviceMap[serverAddr]; ok && svc.LatencyP95 == 0 {
+					svc.LatencyP95 = entryValue(r)
+				}
+			}
+		}
 	}
 
 	// Enrich services that have 0 inbound server metrics with their observed operational rates
