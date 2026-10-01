@@ -17,17 +17,17 @@
 set -euo pipefail
 
 NS=monitoring
-STORES_STS="loki prometheus-kube-prometheus-prometheus"
-STORES_DEPLOY="tempo prometheus-kube-prometheus-kube-state-metrics"
+STORES_STS="loki prometheus-prometheus-kube-prometheus-prometheus"
+STORES_DEPLOY="tempo prometheus-kube-state-metrics"
 DSES="beyla fluent-bit"
 
 stop_stack() {
   echo "--- Scaling stores to 0 ---"
   for sts in $STORES_STS; do
-    kubectl -n "$NS" scale "sts/$sts" --replicas=0 2>/dev/null || echo "  (sts/$sts not found, skipping)"
+    kubectl -n "$NS" scale "sts/$sts" --replicas=0 2>/dev/null || echo "  WARNING: sts/$sts not found - resource names changed, update scripts/pause.sh"
   done
   for dep in $STORES_DEPLOY; do
-    kubectl -n "$NS" scale "deploy/$dep" --replicas=0 2>/dev/null || echo "  (deploy/$dep not found, skipping)"
+    kubectl -n "$NS" scale "deploy/$dep" --replicas=0 2>/dev/null || echo "  WARNING: deploy/$dep not found - resource names changed, update scripts/pause.sh"
   done
   echo "--- Removing DaemonSets (DSes cannot scale to 0) ---"
   kubectl -n "$NS" delete ds $DSES --ignore-not-found
@@ -41,15 +41,15 @@ start_stack() {
   kubectl apply -f deploy/k8s/collection/beyla.yaml
   echo "--- Scaling stores back up ---"
   for sts in $STORES_STS; do
-    kubectl -n "$NS" scale "sts/$sts" --replicas=1 2>/dev/null || echo "  (sts/$sts not found, skipping)"
+    kubectl -n "$NS" scale "sts/$sts" --replicas=1 2>/dev/null || echo "  WARNING: sts/$sts not found - resource names changed, update scripts/pause.sh"
   done
   for dep in $STORES_DEPLOY; do
-    kubectl -n "$NS" scale "deploy/$dep" --replicas=1 2>/dev/null || echo "  (deploy/$dep not found, skipping)"
+    kubectl -n "$NS" scale "deploy/$dep" --replicas=1 2>/dev/null || echo "  WARNING: deploy/$dep not found - resource names changed, update scripts/pause.sh"
   done
   echo "--- Re-installing Fluent Bit ---"
   helm upgrade --install fluent-bit fluent/fluent-bit \
     --namespace "$NS" \
-    -f deploy/k8s/collection/fluent-bit-values.yaml
+    -f deploy/helm/fluent-bit-values.yaml
   echo "--- Waiting ---"
   kubectl -n "$NS" rollout status deploy/tempo --timeout=180s
   kubectl -n "$NS" rollout status ds/fluent-bit --timeout=180s

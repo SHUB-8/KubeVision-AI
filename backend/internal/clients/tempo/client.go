@@ -38,8 +38,8 @@ type traceResponse struct {
 }
 
 type spanBatch struct {
-	Resource  spanResource `json:"resource"`
-	ScopeSpans []scopeSpan `json:"scopeSpans"`
+	Resource   spanResource `json:"resource"`
+	ScopeSpans []scopeSpan  `json:"scopeSpans"`
 }
 
 type spanResource struct {
