@@ -1,0 +1,123 @@
+/* Hallmark · genre: modern-minimal · macrostructure: Workbench · design-system: design.md · designed-as-app */
+@import "tailwindcss";
+@import "@xyflow/react/dist/style.css";
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";
+
+/*
+ * Token system — see design.md at the frontend root.
+ * The slate-* scale IS the neutral ramp (slate-950 = paper … slate-200 = ink),
+ * so existing utilities resolve to tokens. cyan-* is the single accent;
+ * emerald/amber/rose are reserved for status semantics.
+ */
+@theme {
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", monospace;
+
+  /* neutral ramp (paper → ink) — deep navy cast, not gray */
+  --color-slate-950: oklch(0.15 0.025 250);
+  --color-slate-900: oklch(0.185 0.03 250);
+  --color-slate-850: oklch(0.215 0.032 250);
+  --color-slate-800: oklch(0.25 0.033 250);
+  --color-slate-700: oklch(0.32 0.038 250);
+  --color-slate-600: oklch(0.42 0.03 250);
+  --color-slate-500: oklch(0.5 0.025 250);
+  --color-slate-400: oklch(0.62 0.02 250);
+  --color-slate-300: oklch(0.74 0.015 250);
+  --color-slate-200: oklch(0.85 0.01 250);
+  --color-slate-100: oklch(0.93 0.008 250);
+
+  /* accent (interactive only) */
+  --color-cyan-300: oklch(0.84 0.075 215);
+  --color-cyan-400: oklch(0.77 0.1 215);
+  --color-cyan-500: oklch(0.7 0.11 215);
+  --color-cyan-600: oklch(0.6 0.1 215);
+}
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--color-slate-950);
+  color: var(--color-slate-100);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-x: clip;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Focus is always visible, never animated. */
+:focus-visible {
+  outline: 2px solid var(--color-cyan-400);
+  outline-offset: 1px;
+}
+
+::selection {
+  background: oklch(0.72 0.11 215 / 0.25);
+}
+
+/* Scrollbars: quiet, square-ish, blend into the paper. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-slate-700);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-slate-600);
+}
+
+/* React Flow chrome, themed to match the workbench. The attribution stays
+   visible (React Flow license); it is styled to blend, not hidden. */
+.react-flow__attribution {
+  background: var(--color-slate-900) !important;
+  border-radius: 4px 0 0 0;
+  padding: 2px 6px !important;
+}
+.react-flow__attribution a {
+  color: var(--color-slate-500) !important;
+  font-size: 10px;
+}
+.react-flow__controls-button {
+  background: var(--color-slate-900) !important;
+  border-bottom: 1px solid var(--color-slate-800) !important;
+  color: var(--color-slate-400) !important;
+  fill: var(--color-slate-400) !important;
+  border-radius: 0 !important;
+}
+.react-flow__controls-button:hover {
+  background: var(--color-slate-800) !important;
+  color: var(--color-slate-100) !important;
+  fill: var(--color-slate-100) !important;
+}
+.react-flow__minimap {
+  background: var(--color-slate-900) !important;
+  border: 1px solid var(--color-slate-800) !important;
+  border-radius: 6px;
+}
+.react-flow__edge-textbg {
+  fill: var(--color-slate-950) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

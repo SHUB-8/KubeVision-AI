@@ -22,3 +22,4 @@ backend/data/
 .idea/
 .vscode/
 .DS_Store
+.npm-cache/
