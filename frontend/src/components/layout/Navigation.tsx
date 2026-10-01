@@ -1,6 +1,7 @@
 import React from 'react';
 import { useApp, TabType } from '../../context/AppContext';
 import {
+  LifeBuoy,
   Waypoints,
   Server,
   GitBranch,
@@ -41,7 +42,7 @@ export const Navigation: React.FC = () => {
     >
       {/* Brand */}
       <div className="flex items-center gap-2.5 px-4 h-12">
-        <Waypoints className="w-4 h-4 text-cyan-400" strokeWidth={2.2} />
+        <LifeBuoy className="w-4 h-4 text-cyan-400" strokeWidth={2.2} />
         <span className="text-sm font-semibold tracking-tight text-slate-100">
           KubeVision AI
         </span>
