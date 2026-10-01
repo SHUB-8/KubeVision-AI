@@ -2,6 +2,7 @@
 bin/
 backend/bin/
 backend/data/
+data/
 *.test
 *.out
 

@@ -22,13 +22,21 @@ alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
 if [ "${1:-}" = "stop" ]; then
   LOG "Stopping backend"
   if [ -f "$RUN_DIR/backend.pid" ] && kill -0 "$(cat "$RUN_DIR/backend.pid")" 2>/dev/null; then
-    kill "$(cat "$RUN_DIR/backend.pid")"
+    kill "$(cat "$RUN_DIR/backend.pid")" 2>/dev/null || true
     echo "  backend (pid $(cat "$RUN_DIR/backend.pid")) stopped"
   else
     # --foreground runs have no pid file: fall back to the binary name
     pkill -f "bin/kubevision-backend" 2>/dev/null && echo "  backend stopped" || echo "  backend not running"
   fi
   rm -f "$RUN_DIR/backend.pid"
+
+  LOG "Stopping frontend dev server"
+  if [ -f "$RUN_DIR/frontend.pid" ] && kill -0 "$(cat "$RUN_DIR/frontend.pid")" 2>/dev/null; then
+    kill "$(cat "$RUN_DIR/frontend.pid")" 2>/dev/null || true
+    echo "  frontend (pid $(cat "$RUN_DIR/frontend.pid")) stopped"
+  fi
+  pkill -f "vite" 2>/dev/null || true
+  rm -f "$RUN_DIR/frontend.pid"
 
   LOG "Stopping port-forwards"
   pkill -f "kubectl -n monitoring port-forward" 2>/dev/null     && echo "  forwards stopped" || echo "  forwards not running"
@@ -53,13 +61,17 @@ declare -A FWD_SVC=(
   [3100]="svc/loki-gateway:3100:80"
   [3200]="svc/tempo:3200:3200"
 )
-probe() { curl -sf -m 4 "localhost:$1" >/dev/null 2>&1; }
+# probe: check if port is accepting connections (avoid curl -f because Tempo/Loki / returns 404)
+probe() {
+  (echo > /dev/tcp/127.0.0.1/"$1") 2>/dev/null || curl -s -m 2 "http://127.0.0.1:$1" >/dev/null 2>&1
+}
+
 for port in 9090 3100 3200; do
   IFS=: read -r svc lport rport <<< "${FWD_SVC[$port]}"
   if probe "$lport"; then
     LOG "Forward :$lport already up"
   else
-    kubectl -n monitoring port-forward "$svc" "$lport:$rport" >/dev/null 2>&1 &
+    nohup kubectl -n monitoring port-forward "$svc" "$lport:$rport" >/dev/null 2>&1 &
     FWD_PIDS="$FWD_PIDS $!"
   fi
 done
@@ -78,6 +90,7 @@ else
   alive "$RUN_DIR/backend.pid" && kill "$(cat "$RUN_DIR/backend.pid")" 2>/dev/null || true
   if [ ! -x bin/kubevision-backend ]; then
     LOG "No binary - building backend"
+    mkdir -p bin
     (cd backend && GOMODCACHE="$PWD/../.gomodcache" GOCACHE="$PWD/../.gocache" \
       GOTOOLCHAIN=auto GOSUMDB=off go build -o ../bin/kubevision-backend ./cmd/server)
   fi
@@ -100,7 +113,7 @@ else
   TEMPO_URL=http://localhost:3200 \
   OBSERVED_NAMESPACE="${OBSERVED_NAMESPACE:-boutique}" \
   FRONTEND_DIR="${FRONTEND_DIR:-frontend/dist}" \
-    ./bin/kubevision-backend > "$RUN_DIR/backend.log" 2>&1 &
+    nohup ./bin/kubevision-backend > "$RUN_DIR/backend.log" 2>&1 &
   echo $! > "$RUN_DIR/backend.pid"
   for _ in $(seq 1 20); do
     curl -sf -m 2 localhost:8090/api/v1/health >/dev/null 2>&1 && break
@@ -109,12 +122,17 @@ else
 fi
 
 # --- 4. Frontend -------------------------------------------------------------
+if [ ! -d frontend/node_modules ]; then
+  LOG "Installing frontend dependencies"
+  npm --prefix frontend install
+fi
+
 if [ "${1:-}" = "--dev" ] || [ "${2:-}" = "--dev" ]; then
   if ss -tln 2>/dev/null | grep -qE ":517[34] "; then
     LOG "Vite dev server already running"
   else
     LOG "Starting vite dev server (logs: $RUN_DIR/frontend.log)"
-    VITE_API_TARGET=http://localhost:8090 npm --prefix frontend run dev \
+    VITE_API_TARGET=http://localhost:8090 nohup npm --prefix frontend run dev \
       > "$RUN_DIR/frontend.log" 2>&1 &
     echo $! > "$RUN_DIR/frontend.pid"
     sleep 2

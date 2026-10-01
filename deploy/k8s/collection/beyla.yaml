@@ -100,21 +100,11 @@ spec:
       hostPID: true
       hostNetwork: true
       serviceAccountName: beyla
-      # hostNetwork pods inherit the HOST's /etc/resolv.conf. If the host
-      # overrides DNS (e.g. forcing a public resolver), Beyla can no longer
-      # resolve *.svc.cluster.local and all OTLP export fails. Pin the pod's
-      # resolver to the cluster DNS explicitly.
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-          - 10.43.0.10
-        searches:
-          - monitoring.svc.cluster.local
-          - svc.cluster.local
-          - cluster.local
-        options:
-          - name: ndots
-            value: "5"
+      # Use ClusterFirstWithHostNet so the hostNetwork pod automatically uses
+      # the in-cluster DNS resolver across any provider (K3s, EKS, GKE, AKS, bare-metal).
+      dnsPolicy: ClusterFirstWithHostNet
+      tolerations:
+        - operator: Exists
       containers:
         - name: beyla
           image: grafana/beyla:3.33.0
@@ -137,10 +127,11 @@ spec:
             # on the k8s_namespace_name label.
             - name: BEYLA_KUBE_METADATA_ENABLE
               value: "true"
-            # OTLP trace export -> Tempo. Beyla appends /v1/traces; protocol
-            # (http/protobuf) is inferred from the 4318 port.
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://tempo.monitoring.svc.cluster.local:4318"
+            # OTLP trace export -> Tempo (traces only; metrics are scraped via Prometheus :8999)
+            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              value: "http://tempo.monitoring.svc.cluster.local:4318/v1/traces"
+            - name: OTEL_METRICS_EXPORTER
+              value: "none"
             # Process selection + anything env vars can't express
             - name: BEYLA_CONFIG_PATH
               value: "/config/beyla-config.yml"
@@ -156,8 +147,6 @@ spec:
               name: bpffs
             - mountPath: /sys/kernel/debug
               name: sys-debug
-            - mountPath: /sys/kernel/security
-              name: sys-security
       volumes:
         - name: config
           configMap:
@@ -172,6 +161,3 @@ spec:
         - name: sys-debug
           hostPath:
             path: /sys/kernel/debug
-        - name: sys-security
-          hostPath:
-            path: /sys/kernel/security
