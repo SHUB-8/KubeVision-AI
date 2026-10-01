@@ -26,6 +26,11 @@ data:
           replication_factor: 1
         final_sleep: 0s
       max_block_duration: 5m
+    compactor:
+      compaction:
+        # trace retention (matches the PRD default; emptyDir loses data on
+        # restart regardless - mount a PV here for anything beyond dev)
+        block_retention: 72h
     storage:
       trace:
         backend: local
@@ -54,6 +59,12 @@ spec:
           image: grafana/tempo:2.4.1
           args:
             - "-config.file=/etc/tempo/tempo.yaml"
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3200
+            initialDelaySeconds: 15
+            periodSeconds: 10
           ports:
             - containerPort: 3200
               name: http

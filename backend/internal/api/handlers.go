@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,40 +18,58 @@ import (
 )
 
 type Handlers struct {
-	store       *storage.Store
-	k8sClient   *k8s.Client
-	promClient  *prometheus.Client
-	lokiClient  *loki.Client
-	tempoClient *tempo.Client
-	topologySvc *services.TopologyService
-	baseliner   *services.Baseliner
+	store *storage.Store
+	// defaultNamespace is used when a request omits ?namespace= - the
+	// namespace of the observed application (OBSERVED_NAMESPACE env).
+	defaultNamespace string
+	k8sClient        *k8s.Client
+	promClient       *prometheus.Client
+	lokiClient       *loki.Client
+	tempoClient      *tempo.Client
+	topologySvc      *services.TopologyService
+	baseliner        *services.Baseliner
 }
 
 func NewHandlers(store *storage.Store, k8sClient *k8s.Client, promClient *prometheus.Client,
-	lokiClient *loki.Client, tempoClient *tempo.Client) *Handlers {
+	lokiClient *loki.Client, tempoClient *tempo.Client, defaultNamespace string) *Handlers {
+	if defaultNamespace == "" {
+		defaultNamespace = "boutique"
+	}
 	return &Handlers{
-		store:       store,
-		k8sClient:   k8sClient,
-		promClient:  promClient,
-		lokiClient:  lokiClient,
-		tempoClient: tempoClient,
-		topologySvc: services.NewTopologyService(k8sClient, promClient),
-		baseliner:   services.NewBaseliner(store, promClient),
+		store:            store,
+		defaultNamespace: defaultNamespace,
+		k8sClient:        k8sClient,
+		promClient:       promClient,
+		lokiClient:       lokiClient,
+		tempoClient:      tempoClient,
+		topologySvc:      services.NewTopologyService(k8sClient, promClient),
+		baseliner:        services.NewBaseliner(store, promClient),
 	}
 }
 
 func (h *Handlers) GetHealth(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
 	health := models.HealthResponse{Status: "ok"}
 
-	_, err := h.promClient.Query(c.Request.Context(), "up")
-	if err != nil {
+	if _, err := h.promClient.Query(ctx, "up"); err != nil {
 		health.Prometheus = "error"
 	} else {
 		health.Prometheus = "ok"
 	}
 
-	health.Loki = "ok"
-	health.Tempo = "ok"
+	if err := h.lokiClient.Health(ctx); err != nil {
+		health.Loki = "error: " + err.Error()
+	} else {
+		health.Loki = "ok"
+	}
+
+	if err := h.tempoClient.Health(ctx); err != nil {
+		health.Tempo = "error: " + err.Error()
+	} else {
+		health.Tempo = "ok"
+	}
 
 	if h.k8sClient != nil {
 		info, err := h.k8sClient.GetClusterInfo()
@@ -67,7 +86,7 @@ func (h *Handlers) GetHealth(c *gin.Context) {
 }
 
 func (h *Handlers) GetTopology(c *gin.Context) {
-	namespace := c.DefaultQuery("namespace", "boutique")
+	namespace := c.DefaultQuery("namespace", h.defaultNamespace)
 	window := c.DefaultQuery("window", "5m")
 
 	if h.k8sClient == nil {
@@ -84,7 +103,7 @@ func (h *Handlers) GetTopology(c *gin.Context) {
 }
 
 func (h *Handlers) GetServices(c *gin.Context) {
-	namespace := c.DefaultQuery("namespace", "boutique")
+	namespace := c.DefaultQuery("namespace", h.defaultNamespace)
 
 	if h.k8sClient == nil {
 		c.JSON(http.StatusOK, []models.Service{})
@@ -122,42 +141,84 @@ func (h *Handlers) GetServices(c *gin.Context) {
 	c.JSON(http.StatusOK, services)
 }
 
+type metricEntry struct {
+	Metric map[string]string `json:"metric"`
+	Value  []interface{}     `json:"value"`
+}
+
+func parseMetricEntries(data json.RawMessage) []metricEntry {
+	var results []metricEntry
+	if err := json.Unmarshal(data, &results); err != nil {
+		return nil
+	}
+	return results
+}
+
+func entryValue(r metricEntry) float64 {
+	if len(r.Value) >= 2 {
+		switch v := r.Value[1].(type) {
+		case float64:
+			return v
+		case string:
+			var f float64
+			fmt.Sscanf(v, "%f", &f)
+			return f
+		}
+	}
+	return 0
+}
+
 func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 	name := c.Param("name")
-	namespace := c.DefaultQuery("namespace", "boutique")
+	namespace := c.DefaultQuery("namespace", h.defaultNamespace)
 	window := c.DefaultQuery("window", "5m")
 
-	data, err := h.promClient.GetEndpointMetrics(namespace, name, window)
+	// Request rate per endpoint. A failure here means Prometheus is
+	// unreachable - report it instead of an empty list.
+	rateData, err := h.promClient.GetEndpointMetrics(namespace, name, window)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	type metricEntry struct {
-		Metric map[string]string `json:"metric"`
-		Value  []interface{}     `json:"value"`
-	}
-
-	var results []metricEntry
-	if err := json.Unmarshal(data, &results); err != nil {
-		c.JSON(http.StatusOK, []models.Endpoint{})
-		return
-	}
-
 	endpointMap := make(map[string]*models.Endpoint)
-	for _, r := range results {
+	getEndpoint := func(r metricEntry) *models.Endpoint {
 		path := r.Metric["http_route"]
 		method := r.Metric["http_request_method"]
 		key := path + ":" + method
-		if _, exists := endpointMap[key]; !exists {
-			endpointMap[key] = &models.Endpoint{Service: name, Path: path, Method: method}
+		ep, exists := endpointMap[key]
+		if !exists {
+			ep = &models.Endpoint{Service: name, Path: path, Method: method}
+			endpointMap[key] = ep
 		}
-		if len(r.Value) >= 2 {
-			switch v := r.Value[1].(type) {
-			case float64:
-				endpointMap[key].Rate = v
-			case string:
-				fmt.Sscanf(v, "%f", &endpointMap[key].Rate)
+		return ep
+	}
+
+	for _, r := range parseMetricEntries(rateData) {
+		getEndpoint(r).Rate = entryValue(r)
+	}
+
+	// Error rate (5xx fraction) and latency quantiles degrade silently -
+	// an endpoint with traffic but no 5xx series has no error entry, which
+	// just means 0.
+	if data, err := h.promClient.GetEndpointErrors(namespace, name, window); err == nil {
+		for _, r := range parseMetricEntries(data) {
+			getEndpoint(r).ErrorRate = entryValue(r)
+		}
+	}
+
+	quantiles := []struct {
+		q     string
+		field func(ep *models.Endpoint, v float64)
+	}{
+		{"0.5", func(ep *models.Endpoint, v float64) { ep.LatencyP50 = v }},
+		{"0.95", func(ep *models.Endpoint, v float64) { ep.LatencyP95 = v }},
+		{"0.99", func(ep *models.Endpoint, v float64) { ep.LatencyP99 = v }},
+	}
+	for _, q := range quantiles {
+		if data, err := h.promClient.GetEndpointLatency(namespace, name, window, q.q); err == nil {
+			for _, r := range parseMetricEntries(data) {
+				q.field(getEndpoint(r), entryValue(r))
 			}
 		}
 	}
@@ -195,7 +256,7 @@ func (h *Handlers) SearchTraces(c *gin.Context) {
 
 func (h *Handlers) GetLogs(c *gin.Context) {
 	pod := c.Query("pod")
-	namespace := c.DefaultQuery("namespace", "boutique")
+	namespace := c.DefaultQuery("namespace", h.defaultNamespace)
 	filter := c.Query("filter")
 	limit := 100
 	if l := c.Query("limit"); l != "" {
@@ -225,7 +286,7 @@ func (h *Handlers) GetConfig(c *gin.Context) {
 	var settings models.UISettings
 	err := h.store.Get("config:ui_settings", &settings)
 	if err != nil {
-		settings = defaultSettings()
+		settings = defaultSettings(h.defaultNamespace)
 	}
 	c.JSON(http.StatusOK, settings)
 }
@@ -254,7 +315,7 @@ func (h *Handlers) GetClusterInfo(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	pods, err := h.k8sClient.GetPods("boutique")
+	pods, err := h.k8sClient.GetPods(h.defaultNamespace)
 	if err == nil {
 		info.Pods = pods
 	}
@@ -273,7 +334,7 @@ func (h *Handlers) GetBaselines(c *gin.Context) {
 }
 
 func (h *Handlers) RecalculateBaselines(c *gin.Context) {
-	namespace := c.DefaultQuery("namespace", "boutique")
+	namespace := c.DefaultQuery("namespace", h.defaultNamespace)
 	window := c.DefaultQuery("window", "5m")
 	if err := h.baseliner.CalculateBaselines(c.Request.Context(), namespace, window); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -282,12 +343,12 @@ func (h *Handlers) RecalculateBaselines(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "message": "baselines recalculated"})
 }
 
-func defaultSettings() models.UISettings {
+func defaultSettings(namespace string) models.UISettings {
 	return models.UISettings{
 		Theme:           "dark",
 		RefreshInterval: 15,
 		TimeWindow:      "5m",
-		Namespace:       "boutique",
+		Namespace:       namespace,
 		Thresholds: models.ThresholdSettings{
 			ErrorRateWarning: 0.01, ErrorRateCritical: 0.05,
 			LatencyWarning: 0.5, LatencyCritical: 1.0,

@@ -1,0 +1,18 @@
+# kube-prometheus-stack (release: prometheus)
+# Installed via: helm upgrade --install prometheus prometheus-community/kube-prometheus-stack -n monitoring -f <this file>
+
+alertmanager:
+  enabled: false   # KubeVision handles alerting (gateway module)
+grafana:
+  enabled: false   # KubeVision is the dashboard
+
+prometheus:
+  prometheusSpec:
+    # Pick up ServiceMonitors regardless of their release label (Beyla's raw
+    # manifest doesn't, and shouldn't have to, carry the helm release label)
+    serviceMonitorSelectorNilUsesHelmValues: false
+    # Disk caps (docs/architecture.md defaults). retentionSize is the hard
+    # cap; without it Prometheus grows unbounded on the node disk until its
+    # (emptyDir) pod happens to restart.
+    retention: 7d
+    retentionSize: 8GiB

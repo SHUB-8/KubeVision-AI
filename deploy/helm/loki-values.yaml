@@ -1,0 +1,49 @@
+# Grafana Loki — single binary on local filesystem (dev / constrained node).
+# Installed via: helm upgrade --install loki grafana/loki -n monitoring -f <this file>
+deploymentMode: SingleBinary
+
+loki:
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  storage:
+    type: filesystem
+  # TSDB v13 schema on local filesystem. Same `from` date as the chart's
+  # useTestSchema shortcut so existing data stays valid. TSDB requires a
+  # 24h index period.
+  schemaConfig:
+    configs:
+      - from: "2024-04-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+  # Log retention — the ONLY thing bounding Loki's disk usage (it persists
+  # on a PVC via k3s local-path). NOTE: retention_enabled requires
+  # delete_request_store in Loki 3.x.
+  limits_config:
+    retention_period: 168h
+  compactor:
+    retention_enabled: true
+    delete_request_store: filesystem
+
+singleBinary:
+  replicas: 1
+
+# RAM savers: no in-memory cache tier (prevents 10GB memory requests)
+memcached:
+  enabled: false   # chart default is TRUE - would deploy memcached pods
+resultsCache:
+  enabled: false
+chunksCache:
+  enabled: false
+
+# Chart validation requires the scalable components at 0 in SingleBinary mode
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0

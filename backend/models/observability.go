@@ -56,8 +56,12 @@ type Span struct {
 }
 
 type Trace struct {
-	TraceID string `json:"traceId"`
-	Spans   []Span `json:"spans"`
+	TraceID         string `json:"traceId"`
+	RootServiceName string `json:"rootServiceName,omitempty"`
+	RootTraceName   string `json:"rootTraceName,omitempty"`
+	DurationMs      int64  `json:"durationMs,omitempty"`
+	SpanCount       int    `json:"spanCount,omitempty"`
+	Spans           []Span `json:"spans"`
 }
 
 type LogEntry struct {

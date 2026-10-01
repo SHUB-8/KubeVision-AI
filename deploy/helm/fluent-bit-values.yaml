@@ -1,0 +1,16 @@
+# Fluent Bit -> Loki single binary (auth_enabled=false).
+#
+# With Auto_Kubernetes_Labels on, every stream carries these label keys
+# (documented in the Fluent Bit Loki output plugin):
+#   job="fluentbit", namespace_name, pod_name, container_name, stream
+# The backend's LogQL selectors (internal/clients/loki) must use those
+# exact key names.
+config:
+  outputs: |
+    [OUTPUT]
+        Name loki
+        Match kube.*
+        Host loki.monitoring.svc.cluster.local
+        Port 3100
+        Labels job=fluentbit
+        Auto_Kubernetes_Labels on

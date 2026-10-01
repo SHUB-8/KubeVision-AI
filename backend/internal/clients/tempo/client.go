@@ -22,14 +22,15 @@ type searchResponse struct {
 	Traces []tempoTrace `json:"traces"`
 }
 
+// Field names per the Tempo HTTP API search response (TraceSearchMetadata)
+// https://grafana.com/docs/tempo/latest/api_docs/
 type tempoTrace struct {
-	TraceID    string `json:"traceID"`
-	Root       *struct {
-		ServiceName string `json:"serviceName"`
-	} `json:"root"`
-	StartTime  string `json:"startTime"`
-	Duration   string `json:"duration"`
-	TotalSpans int    `json:"totalSpans"`
+	TraceID           string `json:"traceID"`
+	RootServiceName   string `json:"rootServiceName"`
+	RootTraceName     string `json:"rootTraceName"`
+	StartTimeUnixNano string `json:"startTimeUnixNano"`
+	DurationMs        int64  `json:"durationMs"`
+	SpanCount         int    `json:"spanCount"`
 }
 
 type traceResponse struct {
@@ -84,11 +85,15 @@ func (c *Client) SearchTraces(ctx context.Context, serviceName string, limit int
 	if limit <= 0 {
 		limit = 20
 	}
+	// Search endpoint is /api/search (NOT /api/traces/search) with the
+	// logfmt-encoded tags parameter: tags=service.name%3D<name>
 	params := url.Values{}
-	params.Set("service.name", serviceName)
-	params.Set("limit", fmt.Sprintf("%d", limit))
+	if serviceName != "" {
+		params.Set("tags", fmt.Sprintf("service.name=%s", serviceName))
+	}
+	params.Set("limit", strconv.Itoa(limit))
 
-	u := fmt.Sprintf("%s/api/traces/search?%s", c.baseURL, params.Encode())
+	u := fmt.Sprintf("%s/api/search?%s", c.baseURL, params.Encode())
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return nil, err
@@ -115,9 +120,36 @@ func (c *Client) SearchTraces(ctx context.Context, serviceName string, limit int
 		if err != nil {
 			continue
 		}
-		traces = append(traces, models.Trace{TraceID: t.TraceID, Spans: spans})
+		traces = append(traces, models.Trace{
+			TraceID:         t.TraceID,
+			RootServiceName: t.RootServiceName,
+			RootTraceName:   t.RootTraceName,
+			DurationMs:      t.DurationMs,
+			SpanCount:       t.SpanCount,
+			Spans:           spans,
+		})
 	}
 	return traces, nil
+}
+
+// Health probes the Tempo readiness endpoint (monolithic mode exposes every
+// service endpoint, including /ready, on the single tempo service).
+func (c *Client) Health(ctx context.Context) error {
+	u := fmt.Sprintf("%s/ready", c.baseURL)
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("tempo health check failed: %w", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("tempo unhealthy: status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (c *Client) GetTrace(ctx context.Context, traceID string) ([]models.Span, error) {

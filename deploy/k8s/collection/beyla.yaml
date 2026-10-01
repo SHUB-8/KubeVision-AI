@@ -59,6 +59,8 @@ spec:
   endpoints:
     - port: metrics
       interval: 15s
+      # Preserve the per-process instance identifiers Beyla sets itself
+      honorLabels: true
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -79,7 +81,7 @@ spec:
       serviceAccountName: beyla
       containers:
         - name: beyla
-          image: grafana/beyla:latest
+          image: grafana/beyla:3.33.0
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
@@ -87,30 +89,22 @@ spec:
               add:
                 - SYS_ADMIN
           env:
+            # Prometheus scrape endpoint (scraped via the ServiceMonitor below)
             - name: BEYLA_PROMETHEUS_PORT
               value: "8999"
-            - name: BEYLA_K8S_METADATA_ENABLE
+            # Metric groups: RED metrics, service graph metrics, network flows
+            # https://grafana.com/docs/beyla/latest/configure/export-data/
+            - name: BEYLA_PROMETHEUS_FEATURES
+              value: "application,application_service_graph,network"
+            # Decorate metrics/traces with k8s.namespace.name / k8s.pod.name /
+            # ... resource attributes. REQUIRED: the backend's PromQL filters
+            # on the k8s_namespace_name label.
+            - name: BEYLA_KUBE_METADATA_ENABLE
               value: "true"
-            - name: BEYLA_DISCOVERY_NAMESPACE
-              value: ".*"
-            - name: BEYLA_SERVICE_GRAPH_ENABLE
-              value: "true"
-            - name: BEYLA_PRINT_TRACES
-              value: "true"
-            - name: BEYLA_NETWORK_REGISTRATION
-              value: "true"
-            - name: BEYLA_NETWORK_METRICS
-              value: "true"
-            - name: BEYLA_PROMETHEUS_REPORT_TARGET
-              value: "true"
-            - name: BEYLA_PROMETHEUS_REPORT_PEER
-              value: "true"
-            - name: BEYLA_INTERNAL_METRICS
-              value: "true"
+            # OTLP trace export -> Tempo. Beyla appends /v1/traces; protocol
+            # (http/protobuf) is inferred from the 4318 port.
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://tempo.monitoring.svc.cluster.local:4318"
-            - name: BEYLA_EXECUTABLE_NAME
-              value: ".*"
           ports:
             - containerPort: 8999
               name: metrics

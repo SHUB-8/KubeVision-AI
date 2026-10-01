@@ -1,0 +1,16 @@
+# Go build/test artifacts
+backend/bin/
+backend/data/
+*.test
+*.out
+
+# Local run caches (helm/go used inside the sandbox)
+.gocache/
+.gomodcache/
+.helm-cache/
+.helm-config/
+
+# Editor/OS noise
+.idea/
+.vscode/
+.DS_Store

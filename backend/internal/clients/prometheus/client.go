@@ -91,6 +91,20 @@ func (c *Client) GetEndpointMetrics(namespace, service, window string) (json.Raw
 	return c.Query(context.Background(), query)
 }
 
+// GetEndpointErrors returns the 5xx fraction of requests per endpoint
+// (0 = all healthy, 1 = every request failing).
+func (c *Client) GetEndpointErrors(namespace, service, window string) (json.RawMessage, error) {
+	total := fmt.Sprintf(`sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name="%s",service_name="%s"}[%s])) by (http_route, http_request_method)`, namespace, service, window)
+	errors := fmt.Sprintf(`sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name="%s",service_name="%s",http_response_status_code=~"5.."}[%s])) by (http_route, http_request_method)`, namespace, service, window)
+	return c.Query(context.Background(), fmt.Sprintf(`(%s) / (%s)`, errors, total))
+}
+
+// GetEndpointLatency returns a latency quantile (p50/p95/p99) per endpoint.
+func (c *Client) GetEndpointLatency(namespace, service, window, quantile string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(http_server_request_duration_seconds_bucket{k8s_namespace_name="%s",service_name="%s"}[%s])) by (le, http_route, http_request_method))`, quantile, namespace, service, window)
+	return c.Query(context.Background(), query)
+}
+
 func (c *Client) GetServerMetrics(namespace, window string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name="%s"}[%s])) by (service_name, http_route)`, namespace, window)
 	return c.Query(context.Background(), query)

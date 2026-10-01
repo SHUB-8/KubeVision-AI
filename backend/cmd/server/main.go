@@ -45,10 +45,18 @@ func main() {
 		dbPath = "./data/kubevision"
 	}
 
+	// Namespace of the observed application - the default for all API
+	// endpoints when the request omits ?namespace=
+	defaultNamespace := os.Getenv("OBSERVED_NAMESPACE")
+	if defaultNamespace == "" {
+		defaultNamespace = "boutique"
+	}
+
 	log.Println("KubeVision Backend starting...")
 	log.Printf("Prometheus: %s", promURL)
 	log.Printf("Loki:       %s", lokiURL)
 	log.Printf("Tempo:      %s", tempoURL)
+	log.Printf("Namespace:  %s", defaultNamespace)
 
 	if err := os.MkdirAll(dbPath, 0755); err != nil {
 		log.Fatalf("Failed to create data directory: %v", err)
@@ -71,7 +79,7 @@ func main() {
 		log.Println("Running in limited mode - K8s endpoints will be unavailable")
 	}
 
-	router := api.SetupRoutes(store, k8sClient, promClient, lokiClient, tempoClient)
+	router := api.SetupRoutes(store, k8sClient, promClient, lokiClient, tempoClient, defaultNamespace)
 
 	frontendDist := os.Getenv("FRONTEND_DIR")
 	if frontendDist == "" {

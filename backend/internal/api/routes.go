@@ -10,7 +10,7 @@ import (
 )
 
 func SetupRoutes(store *storage.Store, k8sClient *k8s.Client, promClient *prometheus.Client,
-	lokiClient *loki.Client, tempoClient *tempo.Client) *gin.Engine {
+	lokiClient *loki.Client, tempoClient *tempo.Client, defaultNamespace string) *gin.Engine {
 
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
@@ -18,7 +18,7 @@ func SetupRoutes(store *storage.Store, k8sClient *k8s.Client, promClient *promet
 	router.Use(gin.Recovery())
 	router.Use(corsMiddleware())
 
-	handlers := NewHandlers(store, k8sClient, promClient, lokiClient, tempoClient)
+	handlers := NewHandlers(store, k8sClient, promClient, lokiClient, tempoClient, defaultNamespace)
 
 	api := router.Group("/api/v1")
 	{
