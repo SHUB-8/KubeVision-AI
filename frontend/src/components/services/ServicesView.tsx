@@ -40,6 +40,7 @@ export const ServicesView: React.FC = () => {
     refreshCount,
     setActiveTab,
     setSelectedService,
+    selectedService,
   } = useApp();
 
   const [services, setServices] = useState<Service[]>([]);
@@ -71,6 +72,17 @@ export const ServicesView: React.FC = () => {
   useEffect(() => {
     fetchServices();
   }, [activeNamespace, timeWindow, refreshCount]);
+
+  // Arriving from the topology panel's "Metrics" shortcut: narrow the list
+  // to that service and expand its endpoints once loaded.
+  useEffect(() => {
+    if (!selectedService) return;
+    setSearchQuery(selectedService);
+    if (services.some((s) => s.name === selectedService) && !expandedEndpoints[selectedService]) {
+      toggleEndpoints(selectedService);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedService, services]);
 
   const toggleEndpoints = async (serviceName: string) => {
     if (expandedEndpoints[serviceName]) {
