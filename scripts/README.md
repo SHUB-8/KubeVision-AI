@@ -30,3 +30,18 @@ Cluster + stack lifecycle for the single-node k3s dev box. Run from repo root.
 sudo systemctl stop k3s      # frees everything; PVCs + manifests survive
 sudo systemctl start k3s     # pods come back on their own
 ```
+
+## Dev port-forwards (local backend only)
+
+The Go backend running on your machine reaches the stores through localhost
+port-forwards. `pause.sh stop` kills them with the pods; `start` does NOT
+bring them back. After resuming, re-run:
+
+```bash
+kubectl -n monitoring port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090 &
+kubectl -n monitoring port-forward svc/loki-gateway 3100:80 &
+kubectl -n monitoring port-forward svc/tempo 3200:3200 &
+```
+
+Symptom when forgotten: the status bar shows Prometheus/Loki/Tempo as
+disconnected. Verify with `curl localhost:8090/api/v1/health`.
