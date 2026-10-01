@@ -164,6 +164,24 @@ func (c *Client) GetRPCClientMetrics(namespace, window string) (json.RawMessage,
 	return c.Query(context.Background(), query)
 }
 
+// GetNetworkFlows returns eBPF network flow rates targeting the namespace (bytes/sec)
+func (c *Client) GetNetworkFlows(namespace, window string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`sum(rate(beyla_network_flow_bytes_total{k8s_dst_namespace="%s"}[%s])) by (k8s_src_owner_name, k8s_dst_owner_name, direction)`, namespace, window)
+	return c.Query(context.Background(), query)
+}
+
+// GetOutboundNetworkFlows returns eBPF network flow rates originating in the namespace
+func (c *Client) GetOutboundNetworkFlows(namespace, window string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`sum(rate(beyla_network_flow_bytes_total{k8s_src_namespace="%s"}[%s])) by (k8s_src_owner_name, k8s_dst_owner_name, direction)`, namespace, window)
+	return c.Query(context.Background(), query)
+}
+
+// GetServiceThroughput returns incoming byte throughput per destination service in the namespace
+func (c *Client) GetServiceThroughput(namespace, window string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`sum(rate(beyla_network_flow_bytes_total{k8s_dst_namespace="%s"}[%s])) by (k8s_dst_owner_name)`, namespace, window)
+	return c.Query(context.Background(), query)
+}
+
 func ParseVector(raw json.RawMessage) ([]VectorResult, error) {
 	var results []VectorResult
 	if err := json.Unmarshal(raw, &results); err != nil {

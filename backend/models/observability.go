@@ -77,13 +77,14 @@ type LogEntry struct {
 }
 
 type PodInfo struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-	Status    string `json:"status"`
-	Node      string `json:"node"`
-	IP        string `json:"ip"`
-	Restart   int32  `json:"restarts"`
-	Age       string `json:"age"`
+	Name         string `json:"name"`
+	Namespace    string `json:"namespace"`
+	Status       string `json:"status"`
+	Node         string `json:"node"`
+	IP           string `json:"ip"`
+	Restart      int32  `json:"restarts"`
+	Age          string `json:"age"`
+	WorkloadName string `json:"workloadName,omitempty"`
 }
 
 type ClusterInfo struct {

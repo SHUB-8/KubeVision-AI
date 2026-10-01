@@ -217,3 +217,109 @@ func extractServiceName(attrs []spanAttr) string {
 	}
 	return "unknown"
 }
+
+type TraceEdge struct {
+	Source   string
+	Target   string
+	Protocol string
+}
+
+func (c *Client) GetTraceEdges(ctx context.Context, limit int) ([]TraceEdge, error) {
+	if limit <= 0 {
+		limit = 25
+	}
+	params := url.Values{}
+	params.Set("limit", strconv.Itoa(limit))
+	u := fmt.Sprintf("%s/api/search?%s", c.baseURL, params.Encode())
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("tempo search for trace edges failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var searchResp searchResponse
+	if err := json.Unmarshal(body, &searchResp); err != nil {
+		return nil, err
+	}
+
+	edgeMap := make(map[string]TraceEdge)
+	for _, t := range searchResp.Traces {
+		spans, err := c.GetTrace(ctx, t.TraceID)
+		if err != nil {
+			continue
+		}
+		for _, s := range spans {
+			// Inbound server requests with caller address (e.g. loadgenerator -> frontend)
+			clientAddr := s.Attributes["client.address"]
+			if clientAddr != "" {
+				target := s.Attributes["server.address"]
+				if target == "" {
+					target = s.ServiceName
+				}
+				if target != "" && clientAddr != target {
+					proto := "HTTP/1.1"
+					if s.Attributes["rpc.system"] != "" {
+						proto = "gRPC"
+					}
+					key := clientAddr + "->" + target
+					edgeMap[key] = TraceEdge{Source: clientAddr, Target: target, Protocol: proto}
+				}
+			}
+
+			// Outbound database client spans (e.g. cartservice -> redis-cart)
+			dbSystem := s.Attributes["db.system"]
+			if dbSystem != "" && s.ServiceName != "" {
+				target := s.Attributes["server.address"]
+				if target == "" {
+					target = s.Attributes["net.peer.name"]
+				}
+				if target == "" {
+					target = s.Attributes["db.name"]
+				}
+				if target != "" && s.ServiceName != target {
+					proto := dbSystem
+					switch dbSystem {
+					case "redis":
+						proto = "Redis (RESP)"
+					case "postgresql":
+						proto = "PostgreSQL"
+					case "mysql":
+						proto = "MySQL"
+					case "mongodb":
+						proto = "MongoDB"
+					}
+					key := s.ServiceName + "->" + target
+					edgeMap[key] = TraceEdge{Source: s.ServiceName, Target: target, Protocol: proto}
+				}
+			}
+
+			// Outbound messaging client spans (e.g. Kafka, RabbitMQ)
+			msgSystem := s.Attributes["messaging.system"]
+			if msgSystem != "" && s.ServiceName != "" {
+				target := s.Attributes["server.address"]
+				if target == "" {
+					target = s.Attributes["net.peer.name"]
+				}
+				if target != "" && s.ServiceName != target {
+					key := s.ServiceName + "->" + target
+					edgeMap[key] = TraceEdge{Source: s.ServiceName, Target: target, Protocol: msgSystem}
+				}
+			}
+		}
+	}
+
+	edges := make([]TraceEdge, 0, len(edgeMap))
+	for _, edge := range edgeMap {
+		edges = append(edges, edge)
+	}
+	return edges, nil
+}

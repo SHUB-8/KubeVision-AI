@@ -84,10 +84,6 @@ export const DependencyGraph: React.FC = () => {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [filterQuery, setFilterQuery] = useState<string>('');
-  // True when the API returned no peer edges and we fell back to the known
-  // boutique dependency map. Those links are structural only: their rates are
-  // unknown, so the UI must say so rather than invent numbers.
-  const [usingStaticMap, setUsingStaticMap] = useState<boolean>(false);
 
   const fetchTopologyData = useCallback(async () => {
     setLoading(true);
@@ -101,42 +97,7 @@ export const DependencyGraph: React.FC = () => {
       const serviceMap = new Map(servicesData.map((s) => [s.name, s]));
 
       const rawNodes = topoData.nodes || [];
-      let rawEdges = topoData.edges || [];
-
-      // If eBPF has not emitted cross-service peer spans yet, infer topology links between discovered nodes
-      if (rawEdges.length === 0 && rawNodes.length > 0) {
-        const nodeSet = new Set(rawNodes.map((n) => n.id));
-        const defaultLinks = [
-          { source: 'loadgenerator', target: 'frontend', protocol: 'HTTP/1.1' },
-          { source: 'frontend', target: 'checkoutservice', protocol: 'gRPC' },
-          { source: 'frontend', target: 'cartservice', protocol: 'gRPC' },
-          { source: 'frontend', target: 'productcatalogservice', protocol: 'gRPC' },
-          { source: 'frontend', target: 'recommendationservice', protocol: 'gRPC' },
-          { source: 'frontend', target: 'currencyservice', protocol: 'gRPC' },
-          { source: 'frontend', target: 'shippingservice', protocol: 'gRPC' },
-          { source: 'frontend', target: 'adservice', protocol: 'gRPC' },
-          { source: 'checkoutservice', target: 'paymentservice', protocol: 'gRPC' },
-          { source: 'checkoutservice', target: 'emailservice', protocol: 'gRPC' },
-          { source: 'checkoutservice', target: 'cartservice', protocol: 'gRPC' },
-          { source: 'cartservice', target: 'redis-cart', protocol: 'TCP' },
-          { source: 'recommendationservice', target: 'productcatalogservice', protocol: 'gRPC' },
-        ];
-
-        rawEdges = defaultLinks
-          .filter((link) => nodeSet.has(link.source) && nodeSet.has(link.target))
-          .map((link) => ({
-            id: `${link.source}-${link.target}`,
-            source: link.source,
-            target: link.target,
-            protocol: link.protocol,
-            // No peer telemetry means the rate is unknown, not zero and
-            // certainly not a made-up fraction of the caller's rate.
-            rate: 0,
-            errorRate: 0,
-            inferred: true,
-          }));
-      }
-      setUsingStaticMap(rawEdges.length > 0 && rawEdges.every((e: any) => e.inferred));
+      const rawEdges = topoData.edges || [];
 
       // Layout: shared dagre helper (also used by the Rearrange control).
       const positions = computeLayoutMap(
@@ -167,7 +128,7 @@ export const DependencyGraph: React.FC = () => {
             label: node.label || node.id,
             type: node.type,
             namespace: node.namespace || activeNamespace,
-            protocol: node.protocol || (node.id.includes('redis') ? 'TCP' : 'gRPC'),
+            protocol: node.protocol || '',
             rate: svc?.rate || 0,
             errorRate: svc?.errorRate || 0,
             latencyP95: svc?.latencyP95 || 0,
@@ -358,12 +319,6 @@ export const DependencyGraph: React.FC = () => {
 
       {/* React Flow Viewport */}
       <div className="flex-1 w-full h-full">
-        {usingStaticMap && (
-          <div className="absolute top-16 left-4 z-20 max-w-md px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/30 text-[11px] font-mono text-amber-200">
-            No eBPF peer telemetry yet — showing the known boutique dependency map.
-            Links are structural only, so rates and error rates are unavailable.
-          </div>
-        )}
         {nodes.length === 0 ? (
           <EmptyState
             title="No Services Discovered"

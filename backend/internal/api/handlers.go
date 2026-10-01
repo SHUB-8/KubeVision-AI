@@ -42,7 +42,7 @@ func NewHandlers(store *storage.Store, k8sClient *k8s.Client, promClient *promet
 		promClient:       promClient,
 		lokiClient:       lokiClient,
 		tempoClient:      tempoClient,
-		topologySvc:      services.NewTopologyService(k8sClient, promClient),
+		topologySvc:      services.NewTopologyService(k8sClient, promClient, tempoClient),
 		baseliner:        services.NewBaseliner(store, promClient),
 	}
 }
@@ -118,7 +118,10 @@ func (h *Handlers) GetServices(c *gin.Context) {
 
 	serviceMap := make(map[string]*models.Service)
 	for _, pod := range pods {
-		svcName := extractServiceName(pod.Name)
+		svcName := pod.WorkloadName
+		if svcName == "" {
+			svcName = extractServiceName(pod.Name)
+		}
 		if _, exists := serviceMap[svcName]; !exists {
 			serviceMap[svcName] = &models.Service{
 				Name:      svcName,
@@ -173,6 +176,24 @@ func (h *Handlers) GetServices(c *gin.Context) {
 			for _, r := range parseMetricEntries(data) {
 				if svc, ok := serviceMap[r.Metric["service_name"]]; ok && svc.LatencyP95 == 0 {
 					svc.LatencyP95 = entryValue(r)
+				}
+			}
+		}
+	}
+
+	// Enrich services that have 0 inbound server metrics with their observed operational rates
+	// (e.g. client workloads generating outbound requests or databases handling queries)
+	if h.topologySvc != nil {
+		window := c.DefaultQuery("window", "5m")
+		if topo, err := h.topologySvc.GetTopology(c.Request.Context(), namespace, window); err == nil {
+			for _, edge := range topo.Edges {
+				if edge.Rate > 0 {
+					if tgt, ok := serviceMap[edge.Target]; ok && tgt.Rate == 0 {
+						tgt.Rate = edge.Rate
+					}
+					if src, ok := serviceMap[edge.Source]; ok && src.Rate == 0 {
+						src.Rate = edge.Rate
+					}
 				}
 			}
 		}
