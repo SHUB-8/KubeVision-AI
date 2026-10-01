@@ -16,14 +16,18 @@ helm repo add fluent https://fluent.github.io/helm-charts
 helm repo update
 
 echo "--- Ensuring Prometheus Operator CRDs ---"
-# kube-prometheus-stack ships its CRDs in the chart's crds/ dir, which helm
-# applies on INSTALL but never re-applies on UPGRADE. If they're missing
-# (cluster rebuild, manual cleanup), every 'helm upgrade' dies with
-# "no matches for kind Prometheus/PrometheusRule/ServiceMonitor".
-# kubectl apply is idempotent, so this is safe on every run.
+# kube-prometheus-stack >= 91.x ships CRDs as a subchart (charts/crds/crds/,
+# managed by helm via crds.enabled + an upgrade hook job); older charts had a
+# top-level crds/ dir that helm applies on INSTALL but never re-applies on
+# UPGRADE. Applying them up-front is idempotent and keeps upgrades working
+# even if the release was installed by an older chart. --server-side avoids
+# kubectl's 256KB last-applied-annotation limit (the Prometheus CRD exceeds
+# it).
 CRD_DIR=$(mktemp -d)
 helm pull prometheus-community/kube-prometheus-stack --untar --untardir "$CRD_DIR"
-kubectl apply -f "$CRD_DIR"/kube-prometheus-stack/crds/
+CRD_SRC="$CRD_DIR/kube-prometheus-stack/charts/crds/crds"
+[ -d "$CRD_SRC" ] || CRD_SRC="$CRD_DIR/kube-prometheus-stack/crds"
+kubectl apply --server-side --force-conflicts -f "$CRD_SRC"
 rm -rf "$CRD_DIR"
 
 echo "--- Installing kube-prometheus-stack ---"
