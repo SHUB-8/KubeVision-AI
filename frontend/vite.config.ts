@@ -14,6 +14,7 @@ export default defineConfig({
   ],
   server: {
     port: 5173,
+    allowedHosts: ['bowling-frequent-blowing-waiver.trycloudflare.com'],
     proxy: {
       '/api': {
         target: apiTarget,

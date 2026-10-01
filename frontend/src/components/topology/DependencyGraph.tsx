@@ -4,6 +4,7 @@ import {
   ReactFlow,
   MiniMap,
   Controls,
+  Panel,
   Background,
   useNodesState,
   useEdgesState,
@@ -38,6 +39,7 @@ export const DependencyGraph: React.FC = () => {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [filterQuery, setFilterQuery] = useState<string>('');
   // True when the API returned no peer edges and we fell back to the known
   // boutique dependency map. Those links are structural only: their rates are
@@ -106,15 +108,41 @@ export const DependencyGraph: React.FC = () => {
       });
       dagre.layout(g);
 
-            // Compute X and Y
+      // Compute X and Y. Isolated services (no peer telemetry) leave the
+      // flow columns — a disconnected node mid-column reads as a layout bug,
+      // so they get their own labeled band below the graph.
+      const connectedSet = new Set<string>();
+      rawEdges.forEach((e) => {
+        connectedSet.add(e.source);
+        connectedSet.add(e.target);
+      });
+      const orphans = rawNodes.filter((n) => !connectedSet.has(n.id));
+      const orphanSet = new Set(orphans.map((n) => n.id));
+      let mainMaxY = 0;
+      rawNodes.forEach((n) => {
+        const p = g.node(n.id);
+        if (p) mainMaxY = Math.max(mainMaxY, p.y);
+      });
+      const orphanRowY = mainMaxY + NODE_H + 90;
+
       const flowNodes: FlowNode[] = rawNodes.map((node) => {
-        const pos = g.node(node.id);
         const svc = serviceMap.get(node.id);
+        let x: number;
+        let y: number;
+        if (orphanSet.has(node.id)) {
+          const idx = orphans.findIndex((o) => o.id === node.id);
+          x = NODE_W / 2 + 24 + idx * (NODE_W + 48);
+          y = orphanRowY;
+        } else {
+          const pos = g.node(node.id);
+          x = pos?.x ?? 0;
+          y = pos?.y ?? 0;
+        }
 
         return {
           id: node.id,
           type: 'serviceNode',
-          position: { x: (pos?.x ?? 0) - NODE_W / 2, y: (pos?.y ?? 0) - NODE_H / 2 },
+          position: { x: x - NODE_W / 2, y: y - NODE_H / 2 },
           data: {
             label: node.label || node.id,
             type: node.type,
@@ -201,6 +229,43 @@ export const DependencyGraph: React.FC = () => {
     }));
   }, [nodes, filterQuery]);
 
+  // Focus mode: hovering (or selecting) a node dims everything that is not
+  // part of its immediate in/out edges — the fastest way to answer "what
+  // does this service talk to".
+  const activeId = hoveredId ?? selectedNodeId;
+  const neighborIds = useMemo(() => {
+    if (!activeId) return null;
+    const s = new Set<string>([activeId]);
+    edges.forEach((e: any) => {
+      if (e.source === activeId) s.add(e.target);
+      if (e.target === activeId) s.add(e.source);
+    });
+    return s;
+  }, [activeId, edges]);
+
+  const displayedNodes = useMemo(() => {
+    if (!neighborIds) return filteredNodes;
+    return filteredNodes.map((n: any) => ({
+      ...n,
+      style: { ...(n.style || {}), opacity: neighborIds.has(n.id) ? 1 : 0.3 },
+    }));
+  }, [filteredNodes, neighborIds]);
+
+  const displayedEdges = useMemo(() => {
+    if (!activeId) return edges;
+    return edges.map((e: any) => {
+      const keep = e.source === activeId || e.target === activeId;
+      return keep
+        ? e
+        : { ...e, label: undefined, labelStyle: undefined, labelBgStyle: undefined, style: { ...(e.style || {}), opacity: 0.06 } };
+    });
+  }, [edges, activeId]);
+
+  const orphanCount = useMemo(
+    () => nodes.filter((n: any) => !edges.some((e: any) => e.source === n.id || e.target === n.id)).length,
+    [nodes, edges]
+  );
+
   if (loading && nodes.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center min-h-[600px]">
@@ -274,11 +339,13 @@ export const DependencyGraph: React.FC = () => {
           />
         ) : (
           <ReactFlow
-            nodes={filteredNodes}
-            edges={edges}
+            nodes={displayedNodes}
+            edges={displayedEdges}
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onNodeClick={onNodeClick}
+            onNodeMouseEnter={(_, node) => setHoveredId(node.id)}
+            onNodeMouseLeave={() => setHoveredId(null)}
             nodeTypes={nodeTypes as any}
             fitView
             fitViewOptions={{ padding: 0.15, maxZoom: 1 }}
@@ -287,6 +354,11 @@ export const DependencyGraph: React.FC = () => {
             className="bg-[#090d16]"
           >
             <Background color="#1e293b" gap={24} size={1} />
+            {orphanCount > 0 && (
+              <Panel position="bottom-center" className="!text-[10px] font-mono text-slate-500">
+                isolated · no eBPF peer telemetry
+              </Panel>
+            )}
             <Controls className="!bg-slate-900/90 !border !border-slate-700 !rounded-md ! overflow-hidden" />
             <MiniMap
               nodeStrokeWidth={3}

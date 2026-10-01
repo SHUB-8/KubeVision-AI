@@ -7,7 +7,6 @@ import {
   Sliders,
   Save,
   RotateCcw,
-  Sparkles,
   Bot,
   BrainCircuit,
   Activity,
@@ -253,9 +252,8 @@ export const SettingsView: React.FC = () => {
 
           {/* ML Anomaly Pipeline Detection Parameters */}
           <div className="p-6 rounded-md bg-slate-900/60 border border-slate-800 space-y-4">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-              <Sparkles className="w-4 h-4 text-cyan-400" />
-              <span>Two-Stage Machine Learning Parameters</span>
+            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">
+              Two-Stage Machine Learning Parameters
             </h3>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs font-mono">
