@@ -23,3 +23,7 @@ backend/data/
 .vscode/
 .DS_Store
 .npm-cache/
+
+# local-only docs and design-agent state (never commit)
+docs/
+.hallmark/
