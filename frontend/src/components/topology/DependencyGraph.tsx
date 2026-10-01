@@ -164,12 +164,6 @@ export const DependencyGraph: React.FC = () => {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [filterQuery, setFilterQuery] = useState<string>('');
-<<<<<<< HEAD
-=======
-  // True when the API returned no peer edges and we fell back to the known
-  // boutique dependency map. Those links are structural only: their rates are
-  // unknown, so the UI must say so rather than invent numbers.
-
   const [layoutDirection, setLayoutDirection] = useState<'LR' | 'TB'>('LR');
   const containerRef = useRef<HTMLDivElement>(null);
   const flowInstanceRef = useRef<any>(null);
@@ -186,7 +180,6 @@ export const DependencyGraph: React.FC = () => {
       height: typeof window !== 'undefined' ? window.innerHeight : 800,
     };
   }, []);
->>>>>>> 857d77b8c0dfd2c8d5ee4e2a4335681a415a2cc5
 
   const fetchTopologyData = useCallback(async () => {
     setLoading(true);
@@ -200,19 +193,11 @@ export const DependencyGraph: React.FC = () => {
       const serviceMap = new Map(servicesData.map((s) => [s.name, s]));
 
       const rawNodes = topoData.nodes || [];
-<<<<<<< HEAD
       const rawEdges = topoData.edges || [];
-
-      // Layout: shared dagre helper (also used by the Rearrange control).
-      const positions = computeLayoutMap(
-=======
-      let rawEdges = topoData.edges || [];
-
 
       // Layout: responsive adaptive dagre layout based on container dimensions
       const { width, height } = getContainerSize();
       const { positions, direction } = computeLayoutMap(
->>>>>>> 857d77b8c0dfd2c8d5ee4e2a4335681a415a2cc5
         rawNodes.map((n) => n.id),
         rawEdges.map((e) => ({ source: e.source, target: e.target })),
         { containerWidth: width, containerHeight: height, zoom: 1, direction: 'auto' }
@@ -479,11 +464,7 @@ export const DependencyGraph: React.FC = () => {
       </div>
 
       {/* React Flow Viewport */}
-<<<<<<< HEAD
-      <div className="flex-1 w-full h-full">
-=======
       <div ref={containerRef} className="flex-1 w-full h-full relative">
->>>>>>> 857d77b8c0dfd2c8d5ee4e2a4335681a415a2cc5
         {nodes.length === 0 ? (
           <EmptyState
             title="No Services Discovered"

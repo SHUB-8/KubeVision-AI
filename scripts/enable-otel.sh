@@ -57,9 +57,21 @@ patch_otel "currencyservice" "nodejs"
 patch_otel "emailservice" "python"
 patch_otel "recommendationservice" "python"
 
+# 4. Enable OTel context propagation on Go services
+echo "--- Enabling native OpenTelemetry context propagation on Go services ---"
+for deploy in frontend checkoutservice productcatalogservice shippingservice; do
+  if kubectl get deploy -n "$NS" "$deploy" >/dev/null 2>&1; then
+    kubectl set env deploy/"$deploy" -n "$NS" \
+      ENABLE_TRACING=1 \
+      OTEL_SERVICE_NAME="$deploy" \
+      COLLECTOR_SERVICE_ADDR="tempo.monitoring.svc.cluster.local:4317" >/dev/null 2>&1 || true
+  fi
+done
+
 echo ""
 echo "=== OpenTelemetry Auto-Instrumentation successfully configured! ==="
 echo "Watching rollout of instrumented services..."
 kubectl rollout status deploy/adservice -n "$NS" --timeout=180s || true
 kubectl rollout status deploy/paymentservice -n "$NS" --timeout=180s || true
 kubectl rollout status deploy/currencyservice -n "$NS" --timeout=180s || true
+kubectl rollout status deploy/frontend -n "$NS" --timeout=180s || true

@@ -334,6 +334,9 @@ func (h *Handlers) GetTraces(c *gin.Context) {
 
 func (h *Handlers) SearchTraces(c *gin.Context) {
 	serviceName := c.Query("serviceName")
+	if serviceName == "" {
+		serviceName = c.Query("service")
+	}
 	limit := 20
 	if l := c.Query("limit"); l != "" {
 		fmt.Sscanf(l, "%d", &limit)
