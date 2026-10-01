@@ -2,10 +2,33 @@
 
 Cluster + stack lifecycle for the single-node k3s dev box. Run from repo root.
 
+## Who owns what (boundaries)
+
+| Layer | Owner | Notes |
+|---|---|---|
+| Cluster itself (k3s) | `setup-phase1.sh` | once per machine |
+| In-cluster observability stack | `setup-phase2.sh` (install/upgrade) · `pause.sh` (pause/resume) · `cleanup.sh` (disk) | only touches ns/monitoring |
+| Observed app (boutique demo) | `demo-app.sh` | only script that touches ns/boutique |
+| Host dev processes (port-forwards, backend, UI) | `dev-up.sh` | **the only script that runs anything on the host** |
+
+Common questions, answered explicitly:
+
+- **`pause.sh` does not run the backend or the UI.** It only scales the
+  monitoring stores in-cluster. Your local backend, port-forwards and vite
+  are host processes - only `dev-up.sh` starts/stops those.
+- **`pause.sh` does not touch boutique** (the observed app). Pause that
+  separately with `scripts/demo-app.sh scale 0`.
+- `dev-up.sh` never reconfigures the in-cluster stack; if the stack is
+  missing it delegates to `setup-phase2.sh`.
+
+## Scripts
+
 | Order | Script | What it does |
 |---|---|---|
 | 1 | `./scripts/setup-phase1.sh` | Bootstrap k3s (once per machine) |
 | 2 | `./scripts/setup-phase2.sh` | Install/upgrade the observability stack (Prometheus, Loki, Fluent Bit via Helm values files in `deploy/helm/`; Tempo + Beyla via raw manifests in `deploy/k8s/collection/`) |
+| 3 | `./scripts/demo-app.sh install` | Apply the observed app (Google microservices-demo) into ns/boutique |
+| 4 | `./scripts/dev-up.sh` | Forwards + backend + UI on the host (`--dev` = vite, `--rebuild` = rebuild) |
 
 ## Day-to-day
 
