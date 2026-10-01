@@ -27,3 +27,5 @@ backend/data/
 # local-only docs and design-agent state (never commit)
 docs/
 .hallmark/
+.run/
+bin/
