@@ -114,7 +114,7 @@ func (c *Client) SearchTraces(ctx context.Context, serviceName string, limit int
 		return nil, fmt.Errorf("failed to parse tempo response: %w", err)
 	}
 
-	var traces []models.Trace
+	traces := []models.Trace{}
 	for _, t := range searchResp.Traces {
 		spans, err := c.GetTrace(ctx, t.TraceID)
 		if err != nil {

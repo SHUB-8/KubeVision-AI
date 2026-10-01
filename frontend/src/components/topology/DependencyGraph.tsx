@@ -1,9 +1,11 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import dagre from '@dagrejs/dagre';
+import { LayoutGrid } from 'lucide-react';
 import {
   ReactFlow,
   MiniMap,
   Controls,
+  ControlButton,
   Panel,
   Background,
   useNodesState,
@@ -15,6 +17,47 @@ import {
 import { useApp } from '../../context/AppContext';
 import { api } from '../../services/api';
 import { ServiceNode } from './ServiceNode';
+
+// Dagre layered layout shared by initial render and the Rearrange control.
+// Orphans (no peer telemetry) get a band below the graph instead of a flow
+// column. Returns TOP-LEFT positions keyed by node id.
+function computeLayoutMap(
+  ids: string[],
+  conns: { source: string; target: string }[],
+  NODE_W = 248,
+  NODE_H = 108
+): Map<string, { x: number; y: number }> {
+  const g = new dagre.graphlib.Graph();
+  g.setGraph({ rankdir: 'LR', nodesep: 44, ranksep: 96, edgesep: 24, marginx: 24, marginy: 24 });
+  g.setDefaultEdgeLabel(() => ({}));
+  ids.forEach((id) => g.setNode(id, { width: NODE_W, height: NODE_H }));
+  conns.forEach((c) => {
+    if (g.hasNode(c.source) && g.hasNode(c.target)) g.setEdge(c.source, c.target);
+  });
+  dagre.layout(g);
+
+  const connected = new Set<string>();
+  conns.forEach((c) => {
+    connected.add(c.source);
+    connected.add(c.target);
+  });
+  const orphans = ids.filter((id) => !connected.has(id));
+  let mainMaxY = 0;
+  ids.forEach((id) => {
+    const p = g.node(id);
+    if (p) mainMaxY = Math.max(mainMaxY, p.y);
+  });
+
+  const positions = new Map<string, { x: number; y: number }>();
+  ids.forEach((id) => {
+    const p = g.node(id);
+    positions.set(id, { x: (p?.x ?? 0) - NODE_W / 2, y: (p?.y ?? 0) - NODE_H / 2 });
+  });
+  orphans.forEach((id, i) => {
+    positions.set(id, { x: 24 + i * (NODE_W + 48), y: mainMaxY + NODE_H / 2 + 90 });
+  });
+  return positions;
+}
 import { NodeDetailPanel } from './NodeDetailPanel';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 import { EmptyState } from '../common/EmptyState';
@@ -95,22 +138,15 @@ export const DependencyGraph: React.FC = () => {
       }
       setUsingStaticMap(rawEdges.length > 0 && rawEdges.every((e: any) => e.inferred));
 
-      // Layout: dagre layered DAG (left-to-right). Handles orphans, uneven
-      // columns and edge crossings; the heuristic rank map could not.
-      const NODE_W = 248;
-      const NODE_H = 108;
-      const g = new dagre.graphlib.Graph();
-      g.setGraph({ rankdir: 'LR', nodesep: 44, ranksep: 96, edgesep: 24, marginx: 24, marginy: 24 });
-      g.setDefaultEdgeLabel(() => ({}));
-      rawNodes.forEach((n) => g.setNode(n.id, { width: NODE_W, height: NODE_H }));
-      rawEdges.forEach((e) => {
-        if (g.hasNode(e.source) && g.hasNode(e.target)) g.setEdge(e.source, e.target);
-      });
-      dagre.layout(g);
+      // Layout: shared dagre helper (also used by the Rearrange control).
+      const positions = computeLayoutMap(
+        rawNodes.map((n) => n.id),
+        rawEdges.map((e) => ({ source: e.source, target: e.target }))
+      );
 
-      // Compute X and Y. Isolated services (no peer telemetry) leave the
-      // flow columns — a disconnected node mid-column reads as a layout bug,
-      // so they get their own labeled band below the graph.
+      // Isolated services (no peer telemetry) are moved out of the flow
+      // columns by computeLayoutMap — a disconnected node mid-column reads
+      // as a layout bug.
       const connectedSet = new Set<string>();
       rawEdges.forEach((e) => {
         connectedSet.add(e.source);
@@ -118,31 +154,15 @@ export const DependencyGraph: React.FC = () => {
       });
       const orphans = rawNodes.filter((n) => !connectedSet.has(n.id));
       const orphanSet = new Set(orphans.map((n) => n.id));
-      let mainMaxY = 0;
-      rawNodes.forEach((n) => {
-        const p = g.node(n.id);
-        if (p) mainMaxY = Math.max(mainMaxY, p.y);
-      });
-      const orphanRowY = mainMaxY + NODE_H + 90;
 
-      const flowNodes: FlowNode[] = rawNodes.map((node) => {
+            const flowNodes: FlowNode[] = rawNodes.map((node) => {
         const svc = serviceMap.get(node.id);
-        let x: number;
-        let y: number;
-        if (orphanSet.has(node.id)) {
-          const idx = orphans.findIndex((o) => o.id === node.id);
-          x = NODE_W / 2 + 24 + idx * (NODE_W + 48);
-          y = orphanRowY;
-        } else {
-          const pos = g.node(node.id);
-          x = pos?.x ?? 0;
-          y = pos?.y ?? 0;
-        }
+        const pos = positions.get(node.id) ?? { x: 0, y: 0 };
 
         return {
           id: node.id,
           type: 'serviceNode',
-          position: { x: x - NODE_W / 2, y: y - NODE_H / 2 },
+          position: { x: pos.x, y: pos.y },
           data: {
             label: node.label || node.id,
             type: node.type,
@@ -218,6 +238,20 @@ export const DependencyGraph: React.FC = () => {
 
   const onNodeClick = (_: React.MouseEvent, node: FlowNode) => {
     setSelectedNodeId(node.id);
+  };
+
+  // Rearrange: re-run the dagre layout from the current graph and fit it to
+  // the viewport (undo manual dragging).
+  const flowInstanceRef = useRef<any>(null);
+  const handleRearrange = () => {
+    const positions = computeLayoutMap(
+      nodes.map((n: any) => n.id),
+      edges.map((e: any) => ({ source: e.source, target: e.target }))
+    );
+    setNodes((prev: any[]) =>
+      prev.map((n) => ({ ...n, position: positions.get(n.id) ?? n.position }))
+    );
+    setTimeout(() => flowInstanceRef.current?.fitView({ padding: 0.15, maxZoom: 1, duration: 250 }), 60);
   };
 
   const filteredNodes = useMemo(() => {
@@ -348,6 +382,9 @@ export const DependencyGraph: React.FC = () => {
             onNodeMouseLeave={() => setHoveredId(null)}
             nodeTypes={nodeTypes as any}
             fitView
+            onInit={(instance) => {
+              flowInstanceRef.current = instance;
+            }}
             fitViewOptions={{ padding: 0.15, maxZoom: 1 }}
             minZoom={0.35}
             maxZoom={1.8}
@@ -359,7 +396,11 @@ export const DependencyGraph: React.FC = () => {
                 isolated · no eBPF peer telemetry
               </Panel>
             )}
-            <Controls className="!bg-slate-900/90 !border !border-slate-700 !rounded-md ! overflow-hidden" />
+            <Controls className="!bg-slate-900/90 !border !border-slate-700 !rounded-md ! overflow-hidden">
+              <ControlButton onClick={handleRearrange} title="Rearrange layout">
+                <LayoutGrid className="w-3.5 h-3.5" />
+              </ControlButton>
+            </Controls>
             <MiniMap
               nodeStrokeWidth={3}
               zoomable

@@ -72,7 +72,7 @@ func (c *Client) QueryRange(ctx context.Context, logQL string, start, end string
 		return nil, fmt.Errorf("failed to parse loki response: %w", err)
 	}
 
-	var entries []models.LogEntry
+	entries := []models.LogEntry{}
 	for _, stream := range lokiResp.Data.Result {
 		for _, val := range stream.Values {
 			if len(val) >= 2 {

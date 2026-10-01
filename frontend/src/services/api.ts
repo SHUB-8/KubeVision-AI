@@ -47,7 +47,7 @@ export const api = {
     if (namespace) params.set('namespace', namespace);
     if (window) params.set('window', window);
     const res = await fetch(`${BASE_URL}/services?${params.toString()}`);
-    return handleResponse<Service[]>(res);
+    return handleResponse<Service[]>(res).then((d) => d ?? []);
   },
 
   async getServiceEndpoints(name: string, namespace?: string, window?: string): Promise<Endpoint[]> {
@@ -55,14 +55,14 @@ export const api = {
     if (namespace) params.set('namespace', namespace);
     if (window) params.set('window', window);
     const res = await fetch(`${BASE_URL}/services/${encodeURIComponent(name)}/endpoints?${params.toString()}`);
-    return handleResponse<Endpoint[]>(res);
+    return handleResponse<Endpoint[]>(res).then((d) => d ?? []);
   },
 
   async getBaselines(serviceName: string, window?: string): Promise<Baseline[]> {
     const params = new URLSearchParams();
     if (window) params.set('window', window);
     const res = await fetch(`${BASE_URL}/services/${encodeURIComponent(serviceName)}/baselines?${params.toString()}`);
-    return handleResponse<Baseline[]>(res);
+    return handleResponse<Baseline[]>(res).then((d) => d ?? []);
   },
 
   async recalculateBaselines(namespace?: string, window?: string): Promise<{ status: string; message: string }> {
@@ -80,7 +80,7 @@ export const api = {
     if (serviceName) params.set('serviceName', serviceName);
     params.set('limit', limit.toString());
     const res = await fetch(`${BASE_URL}/traces?${params.toString()}`);
-    return handleResponse<Trace[]>(res);
+    return handleResponse<Trace[]>(res).then((d) => d ?? []);
   },
 
   async getTraceDetail(traceId: string): Promise<Trace> {
@@ -105,7 +105,7 @@ export const api = {
     if (params.end) query.set('end', params.end);
 
     const res = await fetch(`${BASE_URL}/logs?${query.toString()}`);
-    return handleResponse<LogEntry[]>(res);
+    return handleResponse<LogEntry[]>(res).then((d) => d ?? []);
   },
 
   async getConfig(): Promise<UISettings> {
