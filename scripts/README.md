@@ -2,6 +2,31 @@
 
 Cluster + stack lifecycle for the single-node k3s dev box. Run from repo root.
 
+## Quickstart — running everything
+
+Fresh machine, four commands, in order:
+
+```bash
+./scripts/setup-phase1.sh        # 1. k3s cluster            (once per machine)
+./scripts/setup-phase2.sh        # 2. observability stack    (Prometheus/Loki/Tempo/Beyla/FluentBit)
+./scripts/demo-app.sh install    # 3. boutique demo app      (the observed workload)
+./scripts/dev-up.sh              # 4. port-forwards + backend + UI
+```
+
+Then open **http://localhost:8090** — that's the whole product.
+
+Day-to-day (nothing here is order-sensitive except pause → dev-up):
+
+```bash
+./scripts/dev-up.sh              # back after reboot; idempotent, safe to re-run
+./scripts/dev-up.sh --dev        # same, but vite hot-reload instead of built UI
+./scripts/pause.sh stop          # end of day: free the RAM (in-cluster stores only)
+./scripts/pause.sh start && ./scripts/dev-up.sh   # resume — pause kills the
+                                                 # port-forwards, dev-up restores them
+./scripts/demo-app.sh scale 0    # pause the demo app itself (loadgen traffic stops)
+./scripts/cleanup.sh             # disk usage + retention report
+```
+
 ## Who owns what (boundaries)
 
 | Layer | Owner | Notes |
