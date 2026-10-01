@@ -152,7 +152,12 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
               <code className="text-amber-300 font-semibold">{bottleneckSpan.operationName}</code> on{' '}
               <code className="text-cyan-300">{bottleneckSpan.serviceName}</code> took{' '}
               <strong>{formatNs(bottleneckSpan.duration)}</strong> (
-              {((bottleneckSpan.duration / totalDurationNs) * 100).toFixed(0)}% of total request).
+              {(() => {
+                const pct = (bottleneckSpan.duration / totalDurationNs) * 100;
+                // A sub-span near 100% reads as a bug ("how can a part be
+                // the whole?") — show the fraction that makes it credible.
+                return pct >= 99 ? `${pct.toFixed(1)}%` : `${pct.toFixed(0)}%`;
+              })()} of total request).
             </span>
           </div>
           <button
