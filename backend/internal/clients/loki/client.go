@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/kubevision/backend/models"
@@ -79,7 +80,7 @@ func (c *Client) QueryRange(ctx context.Context, logQL string, start, end string
 					Timestamp: val[0],
 					Stream:    stream.Stream["job"],
 					Labels:    stream.Stream,
-					Line:      val[1],
+					Line:      normalizeLogLine(val[1]),
 				})
 			}
 		}
@@ -122,4 +123,19 @@ func (c *Client) Health(ctx context.Context) error {
 		return fmt.Errorf("loki unhealthy: status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// normalizeLogLine unwraps structured log envelopes. Fluent Bit forwards some
+// containers' output as the full record JSON (with embedded kubernetes
+// metadata); the actual message lives in the "log" field.
+func normalizeLogLine(line string) string {
+	var envelope struct {
+		Log string `json:"log"`
+	}
+	if strings.HasPrefix(line, "{") && strings.HasSuffix(line, "}") {
+		if err := json.Unmarshal([]byte(line), &envelope); err == nil && envelope.Log != "" {
+			return strings.TrimRight(envelope.Log, "\n\r")
+		}
+	}
+	return line
 }

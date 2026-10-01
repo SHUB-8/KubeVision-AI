@@ -56,7 +56,7 @@ type rawSpan struct {
 	ParentSpanID      string     `json:"parentSpanId"`
 	Name              string     `json:"name"`
 	StartTimeUnixNano string     `json:"startTimeUnixNano"`
-	DurationUnixNano  string     `json:"durationUnixNano"`
+	EndTimeUnixNano   string     `json:"endTimeUnixNano"`
 	Status            spanStatus `json:"status"`
 	Attributes        []spanAttr `json:"attributes"`
 }
@@ -180,7 +180,12 @@ func (c *Client) GetTrace(ctx context.Context, traceID string) ([]models.Span, e
 		for _, scope := range batch.ScopeSpans {
 			for _, raw := range scope.Spans {
 				startNano, _ := strconv.ParseInt(raw.StartTimeUnixNano, 10, 64)
-				durNano, _ := strconv.ParseInt(raw.DurationUnixNano, 10, 64)
+				// Tempo's OTLP JSON reports an absolute end time, not a duration.
+				endNano, _ := strconv.ParseInt(raw.EndTimeUnixNano, 10, 64)
+				durNano := endNano - startNano
+				if durNano < 0 {
+					durNano = 0
+				}
 
 				attrs := make(map[string]string)
 				for _, a := range raw.Attributes {
