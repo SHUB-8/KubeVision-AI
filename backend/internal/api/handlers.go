@@ -134,6 +134,50 @@ func (h *Handlers) GetServices(c *gin.Context) {
 		}
 	}
 
+	// Enrich the K8s inventory with RED metrics from Beyla (via Prometheus).
+	// A missing series (service with no traffic in the window) just leaves
+	// the zero value; a Prometheus error degrades the enrichment only.
+	if h.promClient != nil {
+		window := c.DefaultQuery("window", "5m")
+		if data, err := h.promClient.GetServiceRates(namespace, window); err == nil {
+			for _, r := range parseMetricEntries(data) {
+				if svc, ok := serviceMap[r.Metric["service_name"]]; ok {
+					svc.Rate = entryValue(r)
+				}
+			}
+		}
+		if data, err := h.promClient.GetServiceErrors(namespace, window); err == nil {
+			for _, r := range parseMetricEntries(data) {
+				if svc, ok := serviceMap[r.Metric["service_name"]]; ok {
+					svc.ErrorRate = entryValue(r)
+				}
+			}
+		}
+		// gRPC services have no HTTP series; their error rate and latency come
+		// from the rpc_server_call_* families.
+		if data, err := h.promClient.GetServiceRPCErrors(namespace, window); err == nil {
+			for _, r := range parseMetricEntries(data) {
+				if svc, ok := serviceMap[r.Metric["service_name"]]; ok {
+					svc.ErrorRate += entryValue(r)
+				}
+			}
+		}
+		if data, err := h.promClient.GetServiceLatency(namespace, window, "0.95"); err == nil {
+			for _, r := range parseMetricEntries(data) {
+				if svc, ok := serviceMap[r.Metric["service_name"]]; ok {
+					svc.LatencyP95 = entryValue(r)
+				}
+			}
+		}
+		if data, err := h.promClient.GetServiceRPCLatency(namespace, window, "0.95"); err == nil {
+			for _, r := range parseMetricEntries(data) {
+				if svc, ok := serviceMap[r.Metric["service_name"]]; ok && svc.LatencyP95 == 0 {
+					svc.LatencyP95 = entryValue(r)
+				}
+			}
+		}
+	}
+
 	services := make([]models.Service, 0, len(serviceMap))
 	for _, svc := range serviceMap {
 		services = append(services, *svc)
@@ -183,8 +227,13 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 
 	endpointMap := make(map[string]*models.Endpoint)
 	getEndpoint := func(r metricEntry) *models.Endpoint {
+		// HTTP endpoints are keyed by route+verb; gRPC methods carry
+		// rpc_method ("/pkg.Service/Method") instead.
 		path := r.Metric["http_route"]
 		method := r.Metric["http_request_method"]
+		if path == "" {
+			path = r.Metric["rpc_method"]
+		}
 		key := path + ":" + method
 		ep, exists := endpointMap[key]
 		if !exists {
@@ -197,6 +246,12 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 	for _, r := range parseMetricEntries(rateData) {
 		getEndpoint(r).Rate = entryValue(r)
 	}
+	// gRPC call rate (same service, different metric family).
+	if data, err := h.promClient.GetEndpointRPCMetrics(namespace, name, window); err == nil {
+		for _, r := range parseMetricEntries(data) {
+			getEndpoint(r).Rate += entryValue(r)
+		}
+	}
 
 	// Error rate (5xx fraction) and latency quantiles degrade silently -
 	// an endpoint with traffic but no 5xx series has no error entry, which
@@ -206,19 +261,35 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 			getEndpoint(r).ErrorRate = entryValue(r)
 		}
 	}
+	if data, err := h.promClient.GetEndpointRPCErrors(namespace, name, window); err == nil {
+		for _, r := range parseMetricEntries(data) {
+			getEndpoint(r).ErrorRate += entryValue(r)
+		}
+	}
 
 	quantiles := []struct {
 		q     string
+		get   func(ep *models.Endpoint) float64
 		field func(ep *models.Endpoint, v float64)
 	}{
-		{"0.5", func(ep *models.Endpoint, v float64) { ep.LatencyP50 = v }},
-		{"0.95", func(ep *models.Endpoint, v float64) { ep.LatencyP95 = v }},
-		{"0.99", func(ep *models.Endpoint, v float64) { ep.LatencyP99 = v }},
+		{"0.5", func(ep *models.Endpoint) float64 { return ep.LatencyP50 }, func(ep *models.Endpoint, v float64) { ep.LatencyP50 = v }},
+		{"0.95", func(ep *models.Endpoint) float64 { return ep.LatencyP95 }, func(ep *models.Endpoint, v float64) { ep.LatencyP95 = v }},
+		{"0.99", func(ep *models.Endpoint) float64 { return ep.LatencyP99 }, func(ep *models.Endpoint, v float64) { ep.LatencyP99 = v }},
 	}
 	for _, q := range quantiles {
+		// HTTP first: it is authoritative for endpoints that have it.
 		if data, err := h.promClient.GetEndpointLatency(namespace, name, window, q.q); err == nil {
 			for _, r := range parseMetricEntries(data) {
 				q.field(getEndpoint(r), entryValue(r))
+			}
+		}
+		// gRPC buckets only fill quantiles HTTP left empty (per field).
+		if data, err := h.promClient.GetEndpointRPCLatency(namespace, name, window, q.q); err == nil {
+			for _, r := range parseMetricEntries(data) {
+				ep := getEndpoint(r)
+				if q.get(ep) == 0 {
+					q.field(ep, entryValue(r))
+				}
 			}
 		}
 	}

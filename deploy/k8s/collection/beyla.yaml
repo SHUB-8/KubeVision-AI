@@ -62,6 +62,27 @@ spec:
       # Preserve the per-process instance identifiers Beyla sets itself
       honorLabels: true
 ---
+# Beyla 3.x only starts Application Observability mode when at least one
+# process-selection criterion is set (BEYLA_OPEN_PORT, BEYLA_AUTO_TARGET_EXE,
+# or discovery selectors - see Config.appO11yEnabled in the Beyla source).
+# Env vars can't express the services list, so selection lives in this file.
+#
+# Instrumentation coverage: eBPF uprobes work out of the box for Go services.
+# Java/Node.js/Python/.NET processes are discovered but emit no RED metrics
+# until the OTel SDK is injected into them (Beyla's SDK injector webhook or
+# the OpenTelemetry Operator). Known gap for the polyglot boutique demo: only
+# frontend/productcatalog/checkout/shipping (Go) report metrics today.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: beyla-config
+  namespace: monitoring
+data:
+  beyla-config.yml: |
+    discovery:
+      instrument:
+        - k8s_namespace: boutique
+---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -79,6 +100,21 @@ spec:
       hostPID: true
       hostNetwork: true
       serviceAccountName: beyla
+      # hostNetwork pods inherit the HOST's /etc/resolv.conf. If the host
+      # overrides DNS (e.g. forcing a public resolver), Beyla can no longer
+      # resolve *.svc.cluster.local and all OTLP export fails. Pin the pod's
+      # resolver to the cluster DNS explicitly.
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - 10.43.0.10
+        searches:
+          - monitoring.svc.cluster.local
+          - svc.cluster.local
+          - cluster.local
+        options:
+          - name: ndots
+            value: "5"
       containers:
         - name: beyla
           image: grafana/beyla:3.33.0
@@ -105,10 +141,15 @@ spec:
             # (http/protobuf) is inferred from the 4318 port.
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://tempo.monitoring.svc.cluster.local:4318"
+            # Process selection + anything env vars can't express
+            - name: BEYLA_CONFIG_PATH
+              value: "/config/beyla-config.yml"
           ports:
             - containerPort: 8999
               name: metrics
           volumeMounts:
+            - mountPath: /config
+              name: config
             - mountPath: /var/run/
               name: var-run
             - mountPath: /sys/fs/bpf
@@ -118,6 +159,9 @@ spec:
             - mountPath: /sys/kernel/security
               name: sys-security
       volumes:
+        - name: config
+          configMap:
+            name: beyla-config
         - name: var-run
           hostPath:
             path: /var/run/

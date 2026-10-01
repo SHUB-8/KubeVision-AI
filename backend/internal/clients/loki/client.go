@@ -88,11 +88,13 @@ func (c *Client) QueryRange(ctx context.Context, logQL string, start, end string
 }
 
 func BuildLogQL(namespace, pod, filter string) string {
-	// Label keys are the ones Fluent Bit's Loki output produces with
-	// Auto_Kubernetes_Labels on: namespace_name, pod_name, container_name.
-	selectors := fmt.Sprintf(`namespace_name="%s"`, namespace)
+	// Label keys produced by Fluent Bit's Loki output Label_Keys
+	// $kubernetes['...'] accessors: fluent-bit prefixes nested record keys
+	// with the map name, giving kubernetes_namespace_name /
+	// kubernetes_pod_name / kubernetes_container_name.
+	selectors := fmt.Sprintf(`kubernetes_namespace_name="%s"`, namespace)
 	if pod != "" {
-		selectors += fmt.Sprintf(`, pod_name=~"%s.*"`, pod)
+		selectors += fmt.Sprintf(`, kubernetes_pod_name=~"%s.*"`, pod)
 	}
 	query := fmt.Sprintf(`{%s}`, selectors)
 	if filter != "" {

@@ -1,4 +1,5 @@
 # Go build/test artifacts
+bin/
 backend/bin/
 backend/data/
 *.test
@@ -9,6 +10,13 @@ backend/data/
 .gomodcache/
 .helm-cache/
 .helm-config/
+
+# Vendored chart/source snapshots used for one-off upgrades
+.kps-chart/
+.fb-chart/
+.beyla-src/
+.tempo-src/
+*.tgz
 
 # Editor/OS noise
 .idea/

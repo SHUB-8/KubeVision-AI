@@ -6,6 +6,9 @@ metadata:
   namespace: monitoring
 data:
   tempo.yaml: |
+    # Tempo 3.x monolithic layout: ingester/compactor top-level sections are
+    # gone; retention moved to overrides.defaults.compaction and the
+    # single-binary target is explicit.
     multitenancy_enabled: false
     server:
       http_listen_port: 3200
@@ -17,20 +20,12 @@ data:
               endpoint: "0.0.0.0:4317"
             http:
               endpoint: "0.0.0.0:4318"
-    ingester:
-      lifecycler:
-        address: 127.0.0.1
-        ring:
-          kvstore:
-            store: inmemory
-          replication_factor: 1
-        final_sleep: 0s
-      max_block_duration: 5m
-    compactor:
-      compaction:
-        # trace retention (matches the PRD default; emptyDir loses data on
-        # restart regardless - mount a PV here for anything beyond dev)
-        block_retention: 72h
+    overrides:
+      defaults:
+        compaction:
+          # trace retention (matches the PRD default; emptyDir loses data on
+          # restart regardless - mount a PV here for anything beyond dev)
+          block_retention: 72h
     storage:
       trace:
         backend: local
@@ -38,6 +33,7 @@ data:
           path: /var/tempo/traces
         wal:
           path: /var/tempo/wal
+    target: all
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -56,7 +52,7 @@ spec:
     spec:
       containers:
         - name: tempo
-          image: grafana/tempo:2.4.1
+          image: grafana/tempo:3.1.0
           args:
             - "-config.file=/etc/tempo/tempo.yaml"
           readinessProbe:

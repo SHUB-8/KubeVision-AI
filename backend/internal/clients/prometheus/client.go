@@ -77,7 +77,10 @@ func (c *Client) QueryRange(ctx context.Context, query, start, end, step string)
 }
 
 func (c *Client) GetServiceRates(namespace, window string) (json.RawMessage, error) {
-	query := fmt.Sprintf(`sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name="%s"}[%s])) by (service_name)`, namespace, window)
+	// Beyla emits separate metric families per protocol: HTTP server requests
+	// and gRPC (rpc) server calls. Sum both so a service shows traffic
+	// whichever protocol it speaks.
+	query := fmt.Sprintf(`sum(rate({__name__=~"http_server_request_duration_seconds_count|rpc_server_call_duration_seconds_count",k8s_namespace_name="%s"}[%s])) by (service_name)`, namespace, window)
 	return c.Query(context.Background(), query)
 }
 
@@ -99,6 +102,47 @@ func (c *Client) GetEndpointErrors(namespace, service, window string) (json.RawM
 	return c.Query(context.Background(), fmt.Sprintf(`(%s) / (%s)`, errors, total))
 }
 
+// GetServiceErrors returns the 5xx fraction of requests per service.
+func (c *Client) GetServiceErrors(namespace, window string) (json.RawMessage, error) {
+	total := fmt.Sprintf(`sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name="%s"}[%s])) by (service_name)`, namespace, window)
+	errors := fmt.Sprintf(`sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name="%s",http_response_status_code=~"5.."}[%s])) by (service_name)`, namespace, window)
+	return c.Query(context.Background(), fmt.Sprintf(`(%s) / (%s)`, errors, total))
+}
+
+// GetServiceRPCErrors returns the fraction of gRPC calls whose status is not
+// "OK" (Beyla reports the canonical gRPC status name, not the numeric code).
+func (c *Client) GetServiceRPCErrors(namespace, window string) (json.RawMessage, error) {
+	total := fmt.Sprintf(`sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name="%s"}[%s])) by (service_name)`, namespace, window)
+	errors := fmt.Sprintf(`sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name="%s",rpc_response_status_code!="OK"}[%s])) by (service_name)`, namespace, window)
+	return c.Query(context.Background(), fmt.Sprintf(`(%s) / (%s)`, errors, total))
+}
+
+// GetServiceRPCLatency returns a gRPC latency quantile per service.
+func (c *Client) GetServiceRPCLatency(namespace, window, quantile string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(rpc_server_call_duration_seconds_bucket{k8s_namespace_name="%s"}[%s])) by (le, service_name))`, quantile, namespace, window)
+	return c.Query(context.Background(), query)
+}
+
+// GetEndpointRPCMetrics returns the gRPC call rate per method.
+func (c *Client) GetEndpointRPCMetrics(namespace, service, window string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name="%s",service_name="%s"}[%s])) by (rpc_method)`, namespace, service, window)
+	return c.Query(context.Background(), query)
+}
+
+// GetEndpointRPCErrors returns the fraction of gRPC calls per method whose
+// status is not "OK".
+func (c *Client) GetEndpointRPCErrors(namespace, service, window string) (json.RawMessage, error) {
+	total := fmt.Sprintf(`sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name="%s",service_name="%s"}[%s])) by (rpc_method)`, namespace, service, window)
+	errors := fmt.Sprintf(`sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name="%s",service_name="%s",rpc_response_status_code!="OK"}[%s])) by (rpc_method)`, namespace, service, window)
+	return c.Query(context.Background(), fmt.Sprintf(`(%s) / (%s)`, errors, total))
+}
+
+// GetEndpointRPCLatency returns a gRPC latency quantile per method.
+func (c *Client) GetEndpointRPCLatency(namespace, service, window, quantile string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(rpc_server_call_duration_seconds_bucket{k8s_namespace_name="%s",service_name="%s"}[%s])) by (le, rpc_method))`, quantile, namespace, service, window)
+	return c.Query(context.Background(), query)
+}
+
 // GetEndpointLatency returns a latency quantile (p50/p95/p99) per endpoint.
 func (c *Client) GetEndpointLatency(namespace, service, window, quantile string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(http_server_request_duration_seconds_bucket{k8s_namespace_name="%s",service_name="%s"}[%s])) by (le, http_route, http_request_method))`, quantile, namespace, service, window)
@@ -116,7 +160,7 @@ func (c *Client) GetClientMetrics(namespace, window string) (json.RawMessage, er
 }
 
 func (c *Client) GetRPCClientMetrics(namespace, window string) (json.RawMessage, error) {
-	query := fmt.Sprintf(`sum(rate(rpc_client_duration_seconds_count{k8s_namespace_name="%s"}[%s])) by (service_name, server_address)`, namespace, window)
+	query := fmt.Sprintf(`sum(rate(rpc_client_call_duration_seconds_count{k8s_namespace_name="%s"}[%s])) by (service_name, server_address)`, namespace, window)
 	return c.Query(context.Background(), query)
 }
 

@@ -30,6 +30,11 @@ type Service struct {
 	Replicas  int32             `json:"replicas"`
 	Ready     int32             `json:"ready"`
 	Labels    map[string]string `json:"labels,omitempty"`
+	// RED metrics sourced from Beyla via Prometheus. Zero when the service
+	// had no traffic in the requested window.
+	Rate       float64 `json:"rate"`
+	ErrorRate  float64 `json:"errorRate"`
+	LatencyP95 float64 `json:"latencyP95"`
 }
 
 type Endpoint struct {
