@@ -4,6 +4,7 @@
 #   scripts/dev-up.sh            # stack + forwards + backend, UI served by backend at :8090
 #   scripts/dev-up.sh --dev      # same, plus vite hot-reload dev server (:5173/:5174)
 #   scripts/dev-up.sh --rebuild  # rebuild backend and frontend binaries before starting
+#   scripts/dev-up.sh stop       # kill backend + port-forwards (cluster untouched)
 #
 # Safe to re-run: every step is skipped if it is already up. Logs and pids
 # land in .run/ (gitignored).
@@ -16,6 +17,25 @@ mkdir -p "$RUN_DIR"
 LOG() { echo "--- $*"; }
 
 alive() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
+
+# --- stop: kill host-side processes only (cluster untouched) -----------------
+if [ "${1:-}" = "stop" ]; then
+  LOG "Stopping backend"
+  if [ -f "$RUN_DIR/backend.pid" ] && kill -0 "$(cat "$RUN_DIR/backend.pid")" 2>/dev/null; then
+    kill "$(cat "$RUN_DIR/backend.pid")"
+    echo "  backend (pid $(cat "$RUN_DIR/backend.pid")) stopped"
+  else
+    # --foreground runs have no pid file: fall back to the binary name
+    pkill -f "bin/kubevision-backend" 2>/dev/null && echo "  backend stopped" || echo "  backend not running"
+  fi
+  rm -f "$RUN_DIR/backend.pid"
+
+  LOG "Stopping port-forwards"
+  pkill -f "kubectl -n monitoring port-forward" 2>/dev/null     && echo "  forwards stopped" || echo "  forwards not running"
+
+  LOG "Cluster left running. To pause the in-cluster stores: scripts/pause.sh stop"
+  exit 0
+fi
 
 # --- 1. Cluster + collection stack -----------------------------------------
 if kubectl -n monitoring get pods >/dev/null 2>&1 \
@@ -33,7 +53,7 @@ declare -A FWD_SVC=(
   [3100]="svc/loki-gateway:3100:80"
   [3200]="svc/tempo:3200:3200"
 )
-probe() { curl -sf -m 2 "localhost:$1" >/dev/null 2>&1; }
+probe() { curl -sf -m 4 "localhost:$1" >/dev/null 2>&1; }
 for port in 9090 3100 3200; do
   IFS=: read -r svc lport rport <<< "${FWD_SVC[$port]}"
   if probe "$lport"; then
