@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kubevision/backend/models"
@@ -81,55 +83,128 @@ func NewClient(baseURL string) *Client {
 	}
 }
 
+func isSystemOrHealthOperation(name string) bool {
+	if name == "" {
+		return false
+	}
+	lower := strings.ToLower(name)
+	return strings.Contains(lower, "health") ||
+		strings.Contains(lower, "healthz") ||
+		strings.Contains(lower, "_healthz") ||
+		strings.Contains(lower, "liveness") ||
+		strings.Contains(lower, "readiness") ||
+		strings.Contains(lower, "traceservice/export") ||
+		strings.Contains(lower, "opentelemetry.proto")
+}
+
+func isSystemOrHealthSpan(s models.Span) bool {
+	if isSystemOrHealthOperation(s.OperationName) {
+		return true
+	}
+	path := strings.ToLower(s.Attributes["url.path"])
+	if strings.Contains(path, "health") || strings.Contains(path, "_healthz") {
+		return true
+	}
+	target := strings.ToLower(s.Attributes["http.target"])
+	if strings.Contains(target, "health") || strings.Contains(target, "_healthz") {
+		return true
+	}
+	ua := strings.ToLower(s.Attributes["user_agent.original"])
+	if strings.Contains(ua, "kube-probe") {
+		return true
+	}
+	return false
+}
+
 func (c *Client) SearchTraces(ctx context.Context, serviceName string, limit int) ([]models.Trace, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	// Search endpoint is /api/search (NOT /api/traces/search) with the
-	// logfmt-encoded tags parameter: tags=service.name%3D<name>
-	params := url.Values{}
-	if serviceName != "" {
-		params.Set("tags", fmt.Sprintf("service.name=%s", serviceName))
-	}
-	params.Set("limit", strconv.Itoa(limit))
-
-	u := fmt.Sprintf("%s/api/search?%s", c.baseURL, params.Encode())
-	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("tempo search failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+	fetchLimit := limit * 8
+	if fetchLimit < 100 {
+		fetchLimit = 100
 	}
 
-	var searchResp searchResponse
-	if err := json.Unmarshal(body, &searchResp); err != nil {
-		return nil, fmt.Errorf("failed to parse tempo response: %w", err)
-	}
-
-	traces := []models.Trace{}
-	for _, t := range searchResp.Traces {
-		spans, err := c.GetTrace(ctx, t.TraceID)
-		if err != nil {
-			continue
+	searchWithQuery := func(minDur string) ([]models.Trace, error) {
+		params := url.Values{}
+		if serviceName != "" {
+			params.Set("tags", fmt.Sprintf("service.name=%s", serviceName))
 		}
-		traces = append(traces, models.Trace{
-			TraceID:         t.TraceID,
-			RootServiceName: t.RootServiceName,
-			RootTraceName:   t.RootTraceName,
-			DurationMs:      t.DurationMs,
-			SpanCount:       t.SpanCount,
-			Spans:           spans,
-		})
+		params.Set("limit", strconv.Itoa(fetchLimit))
+		if minDur != "" {
+			params.Set("minDuration", minDur)
+		}
+
+		u := fmt.Sprintf("%s/api/search?%s", c.baseURL, params.Encode())
+		req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("tempo search failed: %w", err)
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+
+		var searchResp searchResponse
+		if err := json.Unmarshal(body, &searchResp); err != nil {
+			return nil, fmt.Errorf("failed to parse tempo response: %w", err)
+		}
+
+		traces := []models.Trace{}
+		for _, t := range searchResp.Traces {
+			if isSystemOrHealthOperation(t.RootTraceName) {
+				continue
+			}
+			spans, err := c.GetTrace(ctx, t.TraceID)
+			if err != nil || len(spans) == 0 {
+				continue
+			}
+			// Skip traces where root span is a health probe (e.g. GET /_healthz from kubelet)
+			if isSystemOrHealthSpan(spans[0]) {
+				continue
+			}
+			cleanSpans := make([]models.Span, 0, len(spans))
+			for _, s := range spans {
+				if !isSystemOrHealthSpan(s) {
+					cleanSpans = append(cleanSpans, s)
+				}
+			}
+			if len(cleanSpans) == 0 {
+				continue
+			}
+			traces = append(traces, models.Trace{
+				TraceID:         t.TraceID,
+				RootServiceName: t.RootServiceName,
+				RootTraceName:   t.RootTraceName,
+				DurationMs:      t.DurationMs,
+				SpanCount:       len(cleanSpans),
+				Spans:           cleanSpans,
+			})
+			if len(traces) >= limit {
+				break
+			}
+		}
+		return traces, nil
 	}
-	return traces, nil
+
+	// 1. Try querying genuine transactions with duration >= 2ms (excludes sub-ms kubelet probes)
+	res, err := searchWithQuery("2ms")
+	if err == nil && len(res) >= limit {
+		return res, nil
+	}
+
+	// 2. If fewer than limit returned, fallback to querying without minDuration
+	fallbackRes, err := searchWithQuery("")
+	if err == nil && len(fallbackRes) > len(res) {
+		return fallbackRes, nil
+	}
+	return res, err
 }
 
 // Health probes the Tempo readiness endpoint (monolithic mode exposes every
@@ -192,7 +267,7 @@ func (c *Client) GetTrace(ctx context.Context, traceID string) ([]models.Span, e
 					attrs[a.Key] = a.Value.StringValue
 				}
 
-				spans = append(spans, models.Span{
+				span := models.Span{
 					TraceID:       raw.TraceID,
 					SpanID:        raw.SpanID,
 					ParentSpanID:  raw.ParentSpanID,
@@ -202,7 +277,11 @@ func (c *Client) GetTrace(ctx context.Context, traceID string) ([]models.Span, e
 					Duration:      durNano,
 					StatusCode:    raw.Status.Code,
 					Attributes:    attrs,
-				})
+				}
+				if isSystemOrHealthSpan(span) {
+					continue
+				}
+				spans = append(spans, span)
 			}
 		}
 	}
@@ -228,8 +307,13 @@ func (c *Client) GetTraceEdges(ctx context.Context, limit int) ([]TraceEdge, err
 	if limit <= 0 {
 		limit = 25
 	}
+	fetchLimit := limit * 4
+	if fetchLimit < 50 {
+		fetchLimit = 50
+	}
 	params := url.Values{}
-	params.Set("limit", strconv.Itoa(limit))
+	params.Set("limit", strconv.Itoa(fetchLimit))
+	params.Set("minDuration", "2ms")
 	u := fmt.Sprintf("%s/api/search?%s", c.baseURL, params.Encode())
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
@@ -253,11 +337,17 @@ func (c *Client) GetTraceEdges(ctx context.Context, limit int) ([]TraceEdge, err
 
 	edgeMap := make(map[string]TraceEdge)
 	for _, t := range searchResp.Traces {
+		if isSystemOrHealthOperation(t.RootTraceName) {
+			continue
+		}
 		spans, err := c.GetTrace(ctx, t.TraceID)
 		if err != nil {
 			continue
 		}
 		for _, s := range spans {
+			if isSystemOrHealthSpan(s) {
+				continue
+			}
 			// Inbound server requests with caller address (e.g. loadgenerator -> frontend)
 			clientAddr := s.Attributes["client.address"]
 			if clientAddr != "" {
@@ -323,3 +413,98 @@ func (c *Client) GetTraceEdges(ctx context.Context, limit int) ([]TraceEdge, err
 	}
 	return edges, nil
 }
+
+// GetEndpointsForService discovers unique operations and computes p50/p95/p99 latencies directly from trace spans.
+func (c *Client) GetEndpointsForService(ctx context.Context, serviceName string) ([]models.Endpoint, error) {
+	if serviceName == "" {
+		return nil, nil
+	}
+	params := url.Values{}
+	params.Set("tags", fmt.Sprintf("service.name=%s", serviceName))
+	params.Set("limit", "50")
+
+	u := fmt.Sprintf("%s/api/search?%s", c.baseURL, params.Encode())
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var searchResp searchResponse
+	if err := json.Unmarshal(body, &searchResp); err != nil {
+		return nil, err
+	}
+
+	type opStats struct {
+		durations []float64
+		errors    int
+		method    string
+	}
+	statsMap := make(map[string]*opStats)
+
+	for _, t := range searchResp.Traces {
+		spans, err := c.GetTrace(ctx, t.TraceID)
+		if err != nil {
+			continue
+		}
+		for _, s := range spans {
+			if s.ServiceName != serviceName || isSystemOrHealthSpan(s) {
+				continue
+			}
+			op := s.OperationName
+			if op == "" {
+				continue
+			}
+			stat, ok := statsMap[op]
+			if !ok {
+				m := "RPC"
+				if strings.HasPrefix(op, "GET") || strings.HasPrefix(op, "POST") || strings.HasPrefix(op, "PUT") || strings.HasPrefix(op, "DELETE") {
+					m = op
+				}
+				stat = &opStats{method: m}
+				statsMap[op] = stat
+			}
+			durMs := float64(s.Duration) / 1e6
+			stat.durations = append(stat.durations, durMs)
+			if s.StatusCode != "" && s.StatusCode != "OK" && s.StatusCode != "STATUS_CODE_OK" && s.StatusCode != "0" {
+				stat.errors++
+			}
+		}
+	}
+
+	endpoints := make([]models.Endpoint, 0, len(statsMap))
+	for op, stat := range statsMap {
+		if len(stat.durations) == 0 {
+			continue
+		}
+		sort.Float64s(stat.durations)
+		n := len(stat.durations)
+		p50 := stat.durations[n*50/100]
+		p95 := stat.durations[n*95/100]
+		p99 := stat.durations[n*99/100]
+		errRate := float64(stat.errors) / float64(n)
+
+		endpoints = append(endpoints, models.Endpoint{
+			Service:    serviceName,
+			Path:       op,
+			Method:     stat.method,
+			Rate:       float64(n) / 60.0,
+			LatencyP50: p50 / 1000.0,
+			LatencyP95: p95 / 1000.0,
+			LatencyP99: p99 / 1000.0,
+			ErrorRate:  errRate,
+		})
+	}
+
+	return endpoints, nil
+}
+

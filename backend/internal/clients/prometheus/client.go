@@ -90,15 +90,15 @@ func (c *Client) GetServiceLatency(namespace, window, quantile string) (json.Raw
 }
 
 func (c *Client) GetEndpointMetrics(namespace, service, window string) (json.RawMessage, error) {
-	query := fmt.Sprintf(`sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name="%s",service_name="%s"}[%s])) by (http_route, http_request_method)`, namespace, service, window)
+	query := fmt.Sprintf(`sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name="%s",service_name="%s"}[%s])) by (http_route, http_request_method) or sum(rate(http_client_request_duration_seconds_count{k8s_namespace_name="%s",server_address=~"%s.*"}[%s])) by (http_route, http_request_method)`, namespace, service, window, namespace, service, window)
 	return c.Query(context.Background(), query)
 }
 
 // GetEndpointErrors returns the 5xx fraction of requests per endpoint
 // (0 = all healthy, 1 = every request failing).
 func (c *Client) GetEndpointErrors(namespace, service, window string) (json.RawMessage, error) {
-	total := fmt.Sprintf(`sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name="%s",service_name="%s"}[%s])) by (http_route, http_request_method)`, namespace, service, window)
-	errors := fmt.Sprintf(`sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name="%s",service_name="%s",http_response_status_code=~"5.."}[%s])) by (http_route, http_request_method)`, namespace, service, window)
+	total := fmt.Sprintf(`(sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name="%s",service_name="%s"}[%s])) by (http_route, http_request_method) or sum(rate(http_client_request_duration_seconds_count{k8s_namespace_name="%s",server_address=~"%s.*"}[%s])) by (http_route, http_request_method))`, namespace, service, window, namespace, service, window)
+	errors := fmt.Sprintf(`(sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name="%s",service_name="%s",http_response_status_code=~"5.."}[%s])) by (http_route, http_request_method) or sum(rate(http_client_request_duration_seconds_count{k8s_namespace_name="%s",server_address=~"%s.*",http_response_status_code=~"5.."}[%s])) by (http_route, http_request_method))`, namespace, service, window, namespace, service, window)
 	return c.Query(context.Background(), fmt.Sprintf(`(%s) / (%s)`, errors, total))
 }
 
@@ -123,29 +123,29 @@ func (c *Client) GetServiceRPCLatency(namespace, window, quantile string) (json.
 	return c.Query(context.Background(), query)
 }
 
-// GetEndpointRPCMetrics returns the gRPC call rate per method.
+// GetEndpointRPCMetrics returns the gRPC call rate per method (from server metrics or client calls targeting this service).
 func (c *Client) GetEndpointRPCMetrics(namespace, service, window string) (json.RawMessage, error) {
-	query := fmt.Sprintf(`sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name="%s",service_name="%s"}[%s])) by (rpc_method)`, namespace, service, window)
+	query := fmt.Sprintf(`sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name="%s",service_name="%s"}[%s])) by (rpc_method) or sum(rate(rpc_client_call_duration_seconds_count{k8s_namespace_name="%s",server_address=~"%s.*"}[%s])) by (rpc_method)`, namespace, service, window, namespace, service, window)
 	return c.Query(context.Background(), query)
 }
 
 // GetEndpointRPCErrors returns the fraction of gRPC calls per method whose
 // status is not "OK".
 func (c *Client) GetEndpointRPCErrors(namespace, service, window string) (json.RawMessage, error) {
-	total := fmt.Sprintf(`sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name="%s",service_name="%s"}[%s])) by (rpc_method)`, namespace, service, window)
-	errors := fmt.Sprintf(`sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name="%s",service_name="%s",rpc_response_status_code!="OK"}[%s])) by (rpc_method)`, namespace, service, window)
+	total := fmt.Sprintf(`(sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name="%s",service_name="%s"}[%s])) by (rpc_method) or sum(rate(rpc_client_call_duration_seconds_count{k8s_namespace_name="%s",server_address=~"%s.*"}[%s])) by (rpc_method))`, namespace, service, window, namespace, service, window)
+	errors := fmt.Sprintf(`(sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name="%s",service_name="%s",rpc_response_status_code!="OK"}[%s])) by (rpc_method) or sum(rate(rpc_client_call_duration_seconds_count{k8s_namespace_name="%s",server_address=~"%s.*",rpc_response_status_code!="OK"}[%s])) by (rpc_method))`, namespace, service, window, namespace, service, window)
 	return c.Query(context.Background(), fmt.Sprintf(`(%s) / (%s)`, errors, total))
 }
 
 // GetEndpointRPCLatency returns a gRPC latency quantile per method.
 func (c *Client) GetEndpointRPCLatency(namespace, service, window, quantile string) (json.RawMessage, error) {
-	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(rpc_server_call_duration_seconds_bucket{k8s_namespace_name="%s",service_name="%s"}[%s])) by (le, rpc_method))`, quantile, namespace, service, window)
+	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(rpc_server_call_duration_seconds_bucket{k8s_namespace_name="%s",service_name="%s"}[%s])) by (le, rpc_method)) or histogram_quantile(%s, sum(rate(rpc_client_call_duration_seconds_bucket{k8s_namespace_name="%s",server_address=~"%s.*"}[%s])) by (le, rpc_method))`, quantile, namespace, service, window, quantile, namespace, service, window)
 	return c.Query(context.Background(), query)
 }
 
 // GetEndpointLatency returns a latency quantile (p50/p95/p99) per endpoint.
 func (c *Client) GetEndpointLatency(namespace, service, window, quantile string) (json.RawMessage, error) {
-	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(http_server_request_duration_seconds_bucket{k8s_namespace_name="%s",service_name="%s"}[%s])) by (le, http_route, http_request_method))`, quantile, namespace, service, window)
+	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(http_server_request_duration_seconds_bucket{k8s_namespace_name="%s",service_name="%s"}[%s])) by (le, http_route, http_request_method)) or histogram_quantile(%s, sum(rate(http_client_request_duration_seconds_bucket{k8s_namespace_name="%s",server_address=~"%s.*"}[%s])) by (le, http_route, http_request_method))`, quantile, namespace, service, window, quantile, namespace, service, window)
 	return c.Query(context.Background(), query)
 }
 

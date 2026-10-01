@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
+import { api } from '../../services/api';
 import {
   RefreshCw,
   Layers,
@@ -8,7 +9,6 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 
-const COMMON_NAMESPACES = ['boutique', 'monitoring', 'kube-system', 'default'];
 const TIME_WINDOWS = ['1m', '5m', '15m', '30m', '1h', '6h', '24h'];
 const REFRESH_INTERVALS = [
   { label: 'Off', value: 0 },
@@ -38,6 +38,17 @@ export const Header: React.FC = () => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [customNsInput, setCustomNsInput] = useState('');
   const [showNsDropdown, setShowNsDropdown] = useState(false);
+  const [clusterNamespaces, setClusterNamespaces] = useState<string[]>([]);
+
+  useEffect(() => {
+    api.getNamespaces()
+      .then((nsList) => {
+        if (nsList && nsList.length > 0) {
+          setClusterNamespaces(nsList);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const handleManualRefresh = () => {
     setIsRefreshing(true);
@@ -94,7 +105,10 @@ export const Header: React.FC = () => {
               <div className="px-3 pb-1.5 pt-1 text-[10px] font-medium uppercase tracking-wider text-slate-500">
                 Namespace
               </div>
-              {COMMON_NAMESPACES.map((ns) => (
+              {(clusterNamespaces.length > 0
+                ? Array.from(new Set([activeNamespace, ...clusterNamespaces]))
+                : [activeNamespace, 'default']
+              ).map((ns) => (
                 <button
                   key={ns}
                   role="menuitem"
