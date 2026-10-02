@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import dagre from '@dagrejs/dagre';
-import { LayoutGrid } from 'lucide-react';
+import { Search, Sparkles } from 'lucide-react';
 import {
   ReactFlow,
   MiniMap,
@@ -17,61 +17,43 @@ import {
 import { useApp } from '../../context/AppContext';
 import { api } from '../../services/api';
 import { ServiceNode } from './ServiceNode';
+import { NodeDetailPanel } from './NodeDetailPanel';
+import { LoadingSpinner } from '../common/LoadingSpinner';
+import { EmptyState } from '../common/EmptyState';
 
-// Dagre layered layout with responsive direction and viewport-adaptive spacing.
-// Automatically chooses horizontal (LR) or vertical (TB) based on container
-// aspect ratio, scales spacing by zoom, and wraps isolated/orphan nodes into
-// responsive grid rows under the main graph.
+// Dagre layered layout with generous spacing to prevent node & edge label overlaps.
+// Tidy layout arranges nodes neatly in the current space and fits the viewport.
 interface LayoutOptions {
   containerWidth?: number;
   containerHeight?: number;
-  zoom?: number;
-  direction?: 'LR' | 'TB' | 'auto';
+  direction?: 'LR' | 'TB';
 }
 
 function computeLayoutMap(
   ids: string[],
   conns: { source: string; target: string }[],
   options?: LayoutOptions,
-  NODE_W = 248,
-  NODE_H = 108
+  NODE_W = 250,
+  NODE_H = 120
 ): { positions: Map<string, { x: number; y: number }>; direction: 'LR' | 'TB' } {
   const width = options?.containerWidth ?? (typeof window !== 'undefined' ? window.innerWidth : 1200);
-  const height = options?.containerHeight ?? (typeof window !== 'undefined' ? window.innerHeight : 800);
-  const zoom = Math.min(1.8, Math.max(0.35, options?.zoom ?? 1));
+  const direction: 'LR' | 'TB' = options?.direction || 'LR';
 
-  // Determine direction:
-  // Auto picks 'TB' if container is taller than wide (aspect ratio < 1.05) or narrow (< 850px), else 'LR'
-  let direction: 'LR' | 'TB';
-  if (options?.direction && options.direction !== 'auto') {
-    direction = options.direction;
-  } else {
-    direction = (height > width * 0.95 || width < 850) ? 'TB' : 'LR';
-  }
-
-  // Adaptive spacing scaled by viewport size & zoom
-  const zoomScale = 0.85 + 0.15 * Math.min(1.5, Math.max(0.6, zoom));
-  const nodesep = Math.round((direction === 'LR' ? 48 : 56) * zoomScale);
-  const ranksep = Math.round((direction === 'LR' ? 104 : 76) * zoomScale);
+  // Generous spacing: prevent overlapping nodes, overlapping edges, and crowded multi-metric labels
+  const nodesep = 80;  // Spacing between nodes in the same rank
+  const ranksep = 180; // Spacing between successive ranks/columns to give ample room for edge labels
+  const edgesep = 40;  // Spacing between adjacent edges
 
   const g = new dagre.graphlib.Graph();
   g.setGraph({
     rankdir: direction,
     nodesep,
     ranksep,
-    edgesep: 24,
-    marginx: 36,
-    marginy: 36,
+    edgesep,
+    marginx: 48,
+    marginy: 48,
   });
   g.setDefaultEdgeLabel(() => ({}));
-
-  ids.forEach((id) => g.setNode(id, { width: NODE_W, height: NODE_H }));
-  conns.forEach((c) => {
-    if (g.hasNode(c.source) && g.hasNode(c.target)) {
-      g.setEdge(c.source, c.target);
-    }
-  });
-  dagre.layout(g);
 
   const connected = new Set<string>();
   conns.forEach((c) => {
@@ -79,6 +61,23 @@ function computeLayoutMap(
     connected.add(c.target);
   });
   const orphans = ids.filter((id) => !connected.has(id));
+
+  // Only layout connected services with Dagre so orphan nodes don't disrupt the rank hierarchy
+  ids.forEach((id) => {
+    if (connected.has(id)) {
+      g.setNode(id, { width: NODE_W, height: NODE_H });
+    }
+  });
+
+  conns.forEach((c) => {
+    if (g.hasNode(c.source) && g.hasNode(c.target)) {
+      g.setEdge(c.source, c.target);
+    }
+  });
+
+  if (connected.size > 0) {
+    dagre.layout(g);
+  }
 
   let mainMinX = Infinity;
   let mainMaxX = -Infinity;
@@ -98,33 +97,33 @@ function computeLayoutMap(
   });
 
   if (mainMinX === Infinity) {
-    mainMinX = 36;
-    mainMaxX = 36 + NODE_W;
-    mainMinY = 36;
-    mainMaxY = 36 + NODE_H;
+    mainMinX = 48;
+    mainMaxX = 48 + NODE_W;
+    mainMinY = 48;
+    mainMaxY = 48 + NODE_H;
   }
 
   const positions = new Map<string, { x: number; y: number }>();
   ids.forEach((id) => {
-    const p = g.node(id);
-    positions.set(id, { x: (p?.x ?? 0) - NODE_W / 2, y: (p?.y ?? 0) - NODE_H / 2 });
+    if (connected.has(id)) {
+      const p = g.node(id);
+      positions.set(id, { x: (p?.x ?? 0) - NODE_W / 2, y: (p?.y ?? 0) - NODE_H / 2 });
+    }
   });
 
-  // Responsive Grid for Isolated / Orphan Nodes:
-  // Instead of an infinite horizontal line, wrap orphans into grid rows that
-  // fit within the available width of the main graph or viewport.
+  // Tidy Grid for Isolated / Orphan Nodes:
+  // Wrapped into clean, aligned grid rows beneath the main flowchart with clear separation
   if (orphans.length > 0) {
-    const orphanGapX = 24;
-    const orphanGapY = 24;
+    const orphanGapX = 32;
+    const orphanGapY = 32;
     const slotW = NODE_W + orphanGapX;
     const slotH = NODE_H + orphanGapY;
 
-    const effectiveContainerWidth = width / zoom;
-    const targetWidth = Math.max(mainMaxX - mainMinX, Math.min(effectiveContainerWidth * 0.9, slotW * 4));
-    const maxCols = Math.max(1, Math.min(orphans.length, Math.floor((targetWidth + orphanGapX) / slotW)));
+    const availableWidth = Math.max(mainMaxX - mainMinX, width - 96);
+    const maxCols = Math.max(1, Math.min(orphans.length, Math.floor((availableWidth + orphanGapX) / slotW) || 3));
 
-    const orphanStartY = mainMaxY + 72;
-    const orphanStartX = mainMinX;
+    const orphanStartY = connected.size > 0 ? mainMaxY + 96 : 48;
+    const orphanStartX = connected.size > 0 ? mainMinX : 48;
 
     orphans.forEach((id, i) => {
       const col = i % maxCols;
@@ -138,18 +137,6 @@ function computeLayoutMap(
 
   return { positions, direction };
 }
-import { NodeDetailPanel } from './NodeDetailPanel';
-import { LoadingSpinner } from '../common/LoadingSpinner';
-import { EmptyState } from '../common/EmptyState';
-import {
-  Search,
-  Filter,
-  Maximize2,
-  RefreshCw,
-  Zap,
-  Layers,
-  ArrowRight,
-} from 'lucide-react';
 
 const nodeTypes: any = {
   serviceNode: ServiceNode,
@@ -164,7 +151,6 @@ export const DependencyGraph: React.FC = () => {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [filterQuery, setFilterQuery] = useState<string>('');
-  const [layoutDirection, setLayoutDirection] = useState<'LR' | 'TB'>('LR');
   const containerRef = useRef<HTMLDivElement>(null);
   const flowInstanceRef = useRef<any>(null);
 
@@ -197,25 +183,13 @@ export const DependencyGraph: React.FC = () => {
 
       // Layout: responsive adaptive dagre layout based on container dimensions
       const { width, height } = getContainerSize();
-      const { positions, direction } = computeLayoutMap(
+      const { positions } = computeLayoutMap(
         rawNodes.map((n) => n.id),
         rawEdges.map((e) => ({ source: e.source, target: e.target })),
-        { containerWidth: width, containerHeight: height, zoom: 1, direction: 'auto' }
+        { containerWidth: width, containerHeight: height, direction: 'LR' }
       );
-      setLayoutDirection(direction);
 
-      // Isolated services (no peer telemetry) are moved out of the flow
-      // columns by computeLayoutMap — a disconnected node mid-column reads
-      // as a layout bug.
-      const connectedSet = new Set<string>();
-      rawEdges.forEach((e) => {
-        connectedSet.add(e.source);
-        connectedSet.add(e.target);
-      });
-      const orphans = rawNodes.filter((n) => !connectedSet.has(n.id));
-      const orphanSet = new Set(orphans.map((n) => n.id));
-
-            const flowNodes: FlowNode[] = rawNodes.map((node) => {
+      const flowNodes: FlowNode[] = rawNodes.map((node) => {
         const svc = serviceMap.get(node.id);
         const pos = positions.get(node.id) ?? { x: 0, y: 0 };
 
@@ -257,8 +231,8 @@ export const DependencyGraph: React.FC = () => {
           id: edge.id,
           source: edge.source,
           target: edge.target,
-          sourceHandle: direction === 'LR' ? 'source-right' : 'source-bottom',
-          targetHandle: direction === 'LR' ? 'target-left' : 'target-top',
+          sourceHandle: 'source-right',
+          targetHandle: 'target-left',
           animated: !edge.inferred,
           style: {
             stroke: strokeColor,
@@ -289,9 +263,17 @@ export const DependencyGraph: React.FC = () => {
         };
       });
 
-
       setNodes(flowNodes);
       setEdges(flowEdges);
+
+      // Auto-fit newly loaded topology smoothly into the viewport
+      setTimeout(() => {
+        flowInstanceRef.current?.fitView({
+          padding: 0.2,
+          maxZoom: 1,
+          duration: 350,
+        });
+      }, 60);
     } catch (err: any) {
       console.error('Error fetching topology:', err);
       setError(err.message);
@@ -308,29 +290,23 @@ export const DependencyGraph: React.FC = () => {
     setSelectedNodeId(node.id);
   };
 
-  // Rearrange: adaptively re-compute layout according to window dimensions,
-  // aspect ratio, and zoom level. Toggles between horizontal and vertical flow
-  // and smoothly centers the graph.
-  const handleRearrange = () => {
+  // Tidy / Rearrange layout:
+  // Re-computes clean, non-overlapping hierarchical positions for all nodes
+  // using Dagre, untangles overlapping edges, and fits the flowchart neatly into the viewport.
+  const handleRearrange = useCallback(() => {
     const { width, height } = getContainerSize();
-    const currentZoom = flowInstanceRef.current?.getZoom() || 1;
 
-    // Toggle orientation or re-adapt dynamically
-    const nextDir: 'LR' | 'TB' = layoutDirection === 'LR' ? 'TB' : 'LR';
-
-    const { positions, direction } = computeLayoutMap(
+    const { positions } = computeLayoutMap(
       nodes.map((n: any) => n.id),
       edges.map((e: any) => ({ source: e.source, target: e.target })),
       {
         containerWidth: width,
         containerHeight: height,
-        zoom: currentZoom,
-        direction: nextDir,
+        direction: 'LR',
       }
     );
-    setLayoutDirection(direction);
 
-    // Update node positions
+    // Apply clean non-overlapping positions
     setNodes((prev: any[]) =>
       prev.map((n) => ({
         ...n,
@@ -338,24 +314,24 @@ export const DependencyGraph: React.FC = () => {
       }))
     );
 
-    // Update edge source/target handles to match the new layout direction
+    // Ensure edge handles match clean LR flow
     setEdges((prev: any[]) =>
       prev.map((e) => ({
         ...e,
-        sourceHandle: direction === 'LR' ? 'source-right' : 'source-bottom',
-        targetHandle: direction === 'LR' ? 'target-left' : 'target-top',
+        sourceHandle: 'source-right',
+        targetHandle: 'target-left',
       }))
     );
 
-    // Smoothly animate fitView to the newly rearranged layout
+    // Smoothly fit view to the tidy layout without clipping
     setTimeout(() => {
       flowInstanceRef.current?.fitView({
-        padding: 0.15,
+        padding: 0.2,
         maxZoom: 1,
-        duration: 350,
+        duration: 400,
       });
     }, 50);
-  };
+  }, [nodes, edges, getContainerSize, setNodes, setEdges]);
 
   const filteredNodes = useMemo(() => {
     if (!filterQuery.trim()) return nodes;
@@ -450,22 +426,16 @@ export const DependencyGraph: React.FC = () => {
             <span className="w-2 h-2 rounded-full bg-rose-500" />
             <span className="text-slate-300">Errors (&gt;1%)</span>
           </div>
-          <div className="flex items-center gap-1.5">
-            <span className="px-1 py-0.2 rounded bg-slate-800 text-cyan-300 border border-slate-700 text-[9px]">
-              gRPC
-            </span>
-            <span className="text-slate-400">eBPF Discovered</span>
-          </div>
         </div>
 
-        {/* Layout Rearrange & Toggle Button */}
+        {/* Tidy Layout Button */}
         <button
           onClick={handleRearrange}
           className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-slate-900/90 hover:bg-slate-800 border border-slate-700/80 text-[11px] font-mono text-slate-300 hover:text-cyan-400 transition"
-          title={`Rearrange layout (Current: ${layoutDirection === 'LR' ? 'Horizontal' : 'Vertical'} — Click to adapt & toggle)`}
+          title="Tidy layout (auto-align nodes without overlaps and fit to view)"
         >
-          <LayoutGrid className="w-3.5 h-3.5 text-cyan-400" />
-          <span>{layoutDirection === 'LR' ? 'Horizontal Flow' : 'Vertical Flow'}</span>
+          <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+          <span>Tidy Layout</span>
         </button>
       </div>
 
@@ -492,7 +462,7 @@ export const DependencyGraph: React.FC = () => {
             onInit={(instance) => {
               flowInstanceRef.current = instance;
             }}
-            fitViewOptions={{ padding: 0.15, maxZoom: 1 }}
+            fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
             minZoom={0.35}
             maxZoom={1.8}
             className="bg-[#090d16]"
@@ -503,12 +473,12 @@ export const DependencyGraph: React.FC = () => {
                 isolated · no eBPF peer telemetry
               </Panel>
             )}
-            <Controls className="!bg-slate-900/90 !border !border-slate-700 !rounded-md ! overflow-hidden">
+            <Controls className="!bg-slate-900/90 !border !border-slate-700 !rounded-md !overflow-hidden">
               <ControlButton
                 onClick={handleRearrange}
-                title={`Rearrange layout (${layoutDirection === 'LR' ? 'Horizontal → Click for Vertical' : 'Vertical → Click for Horizontal'})`}
+                title="Tidy layout (auto-align nodes and fit view)"
               >
-                <LayoutGrid className="w-3.5 h-3.5" />
+                <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
               </ControlButton>
             </Controls>
             <MiniMap
