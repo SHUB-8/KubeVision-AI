@@ -1,5 +1,19 @@
 package models
 
+// Provenance values for RateSource / LatencySource. Every number the UI shows
+// must be able to say where it came from: a p95 computed from a handful of
+// sampled spans and a histogram_quantile over every request on the wire are
+// not the same evidence, and must not look identical on screen.
+const (
+	// SourceMetrics - measured by eBPF/Beyla, scraped from Prometheus.
+	SourceMetrics = "metrics"
+	// SourceTraces - derived by this backend from Tempo spans (sampled).
+	SourceTraces = "traces"
+	// SourceEstimated - borrowed from a peer's measured rate because this
+	// service's own L7 protocol is not parsed (e.g. Redis RESP).
+	SourceEstimated = "estimated"
+)
+
 type Node struct {
 	ID         string            `json:"id"`
 	Label      string            `json:"label"`
@@ -9,17 +23,24 @@ type Node struct {
 	Rate       float64           `json:"rate,omitempty"`
 	ErrorRate  float64           `json:"errorRate,omitempty"`
 	LatencyP95 float64           `json:"latencyP95,omitempty"`
-	Labels     map[string]string `json:"labels,omitempty"`
+	// RateSource / LatencySource are empty when the value is absent (no data),
+	// which is distinct from a measured zero. The frontend renders "no data"
+	// for an absent value rather than "0 req/s / 0 ms".
+	RateSource    string            `json:"rateSource,omitempty"`
+	LatencySource string            `json:"latencySource,omitempty"`
+	Labels        map[string]string `json:"labels,omitempty"`
 }
 
 type Edge struct {
-	ID         string  `json:"id"`
-	Source     string  `json:"source"`
-	Target     string  `json:"target"`
-	Protocol   string  `json:"protocol,omitempty"`
-	Rate       float64 `json:"rate,omitempty"`
-	ErrorRate  float64 `json:"errorRate,omitempty"`
-	LatencyP95 float64 `json:"latencyP95,omitempty"`
+	ID            string  `json:"id"`
+	Source        string  `json:"source"`
+	Target        string  `json:"target"`
+	Protocol      string  `json:"protocol,omitempty"`
+	Rate          float64 `json:"rate,omitempty"`
+	ErrorRate     float64 `json:"errorRate,omitempty"`
+	LatencyP95    float64 `json:"latencyP95,omitempty"`
+	RateSource    string  `json:"rateSource,omitempty"`
+	LatencySource string  `json:"latencySource,omitempty"`
 }
 
 type Topology struct {
@@ -50,6 +71,10 @@ type Endpoint struct {
 	LatencyP99 float64 `json:"latencyP99"`
 	Rate       float64 `json:"rate"`
 	ErrorRate  float64 `json:"errorRate"`
+	// See the Source* constants. "traces" means the value was computed by this
+	// backend from sampled spans, not measured from the full request stream.
+	RateSource    string `json:"rateSource,omitempty"`
+	LatencySource string `json:"latencySource,omitempty"`
 }
 
 type Span struct {

@@ -273,14 +273,22 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 	// 1. HTTP request rate from Prometheus (server or client calling this service)
 	if rateData, err := h.promClient.GetEndpointMetrics(namespace, name, window); err == nil {
 		for _, r := range parseMetricEntries(rateData) {
-			getEndpoint(r).Rate += entryValue(r)
+			ep := getEndpoint(r)
+			ep.Rate += entryValue(r)
+			if ep.Rate > 0 {
+				ep.RateSource = models.SourceMetrics
+			}
 		}
 	}
 
 	// 2. gRPC call rate from Prometheus (server or client calling this service)
 	if data, err := h.promClient.GetEndpointRPCMetrics(namespace, name, window); err == nil {
 		for _, r := range parseMetricEntries(data) {
-			getEndpoint(r).Rate += entryValue(r)
+			ep := getEndpoint(r)
+			ep.Rate += entryValue(r)
+			if ep.Rate > 0 {
+				ep.RateSource = models.SourceMetrics
+			}
 		}
 	}
 
@@ -309,35 +317,54 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 	for _, q := range quantiles {
 		if data, err := h.promClient.GetEndpointLatency(namespace, name, window, q.q); err == nil {
 			for _, r := range parseMetricEntries(data) {
-				q.field(getEndpoint(r), entryValue(r))
+				ep := getEndpoint(r)
+				if v := entryValue(r); v > 0 {
+					q.field(ep, v)
+					ep.LatencySource = models.SourceMetrics
+				}
 			}
 		}
 		if data, err := h.promClient.GetEndpointRPCLatency(namespace, name, window, q.q); err == nil {
 			for _, r := range parseMetricEntries(data) {
 				ep := getEndpoint(r)
 				if q.get(ep) == 0 {
-					q.field(ep, entryValue(r))
+					if v := entryValue(r); v > 0 {
+						q.field(ep, v)
+						ep.LatencySource = models.SourceMetrics
+					}
 				}
 			}
 		}
 	}
 
-	// 5. Supplement endpoints and latencies discovered via Tempo distributed tracing
+	// 5. Supplement endpoints and latencies discovered via Tempo distributed tracing.
+	// Anything filled from here is marked "traces": it is computed by this backend
+	// from SAMPLED spans (see tempo.GetEndpointsForService), which is materially
+	// weaker evidence than a histogram quantile over every request on the wire.
+	// The value is still useful - but the UI must be able to say where it came from.
 	if tempoEndpoints, err := h.tempoClient.GetEndpointsForService(c.Request.Context(), name); err == nil {
 		for _, tep := range tempoEndpoints {
 			key := tep.Path + ":" + tep.Method
 			ep, exists := endpointMap[key]
 			if !exists {
 				tepCopy := tep
+				if tepCopy.Rate > 0 {
+					tepCopy.RateSource = models.SourceTraces
+				}
+				if tepCopy.LatencyP95 > 0 {
+					tepCopy.LatencySource = models.SourceTraces
+				}
 				endpointMap[key] = &tepCopy
 			} else {
 				if ep.LatencyP95 == 0 && tep.LatencyP95 > 0 {
 					ep.LatencyP50 = tep.LatencyP50
 					ep.LatencyP95 = tep.LatencyP95
 					ep.LatencyP99 = tep.LatencyP99
+					ep.LatencySource = models.SourceTraces
 				}
 				if ep.Rate == 0 && tep.Rate > 0 {
 					ep.Rate = tep.Rate
+					ep.RateSource = models.SourceTraces
 				}
 			}
 		}

@@ -201,6 +201,43 @@ func (c *Client) GetServiceThroughput(namespace, window string) (json.RawMessage
 	return c.Query(context.Background(), query)
 }
 
+// --- Database / cache traffic -------------------------------------------------
+//
+// Beyla parses DB wire protocols (Redis RESP, SQL, MongoDB, ...) and emits
+// db_client_operation_duration_seconds on the CALLER and
+// db_server_operation_duration_seconds on the database process itself. These
+// families are the only source of latency for a datastore: it speaks RESP/TCP,
+// not HTTP or gRPC, so no http_*/rpc_* histogram covers it. Without them a
+// cache like redis-cart reports a borrowed request rate and NO latency at all.
+
+// GetDBClientRates returns the measured call rate per (caller, database) pair.
+func (c *Client) GetDBClientRates(namespace, window string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`sum(rate(db_client_operation_duration_seconds_count{k8s_namespace_name="%s"}[%s])) by (service_name, server_address)`, namespace, window)
+	return c.Query(context.Background(), query)
+}
+
+// GetDBClientLatency returns the caller-observed latency quantile per
+// (caller, database) pair.
+func (c *Client) GetDBClientLatency(namespace, window, quantile string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(db_client_operation_duration_seconds_bucket{k8s_namespace_name="%s"}[%s])) by (le, service_name, server_address))`, quantile, namespace, window)
+	return c.Query(context.Background(), query)
+}
+
+// GetDBServerLatency returns the database-observed latency quantile per
+// database service.
+//
+// NOT WIRED UP, ON PURPOSE. On this stack the value is wrong: for redis-cart it
+// reports a 320 ms mean / 1717 ms p95 for the same calls the client measures at
+// 0.16 ms / 4.75 ms, and sum(rate(_sum)) sits at ~1.0 seconds per second, which
+// means the timer is running continuously and effectively measuring the gap to
+// the next request (1/request-rate = 0.324 s matches the reported 0.320 s).
+// Keep it here as the documented query, but do not feed it to the topology
+// until the pairing behaviour is confirmed fixed upstream.
+func (c *Client) GetDBServerLatency(namespace, window, quantile string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(db_server_operation_duration_seconds_bucket{k8s_namespace_name="%s"}[%s])) by (le, service_name))`, quantile, namespace, window)
+	return c.Query(context.Background(), query)
+}
+
 func ParseVector(raw json.RawMessage) ([]VectorResult, error) {
 	var results []VectorResult
 	if err := json.Unmarshal(raw, &results); err != nil {

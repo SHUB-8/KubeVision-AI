@@ -1,6 +1,7 @@
 import React, { memo } from 'react';
 import { Handle, Position, NodeProps } from '@xyflow/react';
 import { AlertTriangle } from 'lucide-react';
+import type { MetricSource } from '../../types/api';
 
 interface ServiceNodeData {
   label: string;
@@ -10,6 +11,8 @@ interface ServiceNodeData {
   rate?: number;
   errorRate?: number;
   latencyP95?: number;
+  rateSource?: MetricSource;
+  latencySource?: MetricSource;
   status?: string;
   replicas?: number;
   ready?: number;
@@ -34,21 +37,35 @@ export const ServiceNode = memo(({ data, selected }: NodeProps<any>) => {
     borderColor = 'border-cyan-400 ring-2 ring-cyan-500/30';
   }
 
-  // A service can be discovered from the K8s API while eBPF reports nothing
-  // for it (non-Go runtimes need OTel SDK injection). That is "not measured",
-  // which must not be rendered as "0 req/s, 0 ms" - that reads as healthy-idle.
-  const hasTelemetry = (nodeData.rate || 0) > 0 || (nodeData.latencyP95 || 0) > 0;
+  // "Not measured" must never render as "0 req/s / 0 ms" - that reads as
+  // healthy-idle. Each field is judged on its own: a service can have a
+  // measured request rate but no latency data at all (a cache speaking RESP
+  // has no duration histogram), and a combined check would hide that.
+  const hasRate = (nodeData.rate ?? 0) > 0;
+  const hasLatency = (nodeData.latencyP95 ?? 0) > 0;
+
+  // The old hint blamed non-Go runtimes for needing SDK injection. That was
+  // wrong: Beyla instruments every supported language natively. When all
+  // non-Go services are dark while Go services report, the cause is almost
+  // always the HOST KERNEL - Clang LTO/ThinLTO mangles the kprobe symbols the
+  // generic tracer attaches to, which aborts the whole generic tracer.
   const noDataHint =
-    'No eBPF telemetry for this service. Beyla instruments Go natively; Java/Node/Python/.NET need OTel SDK injection.';
+    'No eBPF telemetry for this service. If every non-Go service is dark while Go services ' +
+    'report, suspect the host kernel: Clang LTO/ThinLTO builds mangle the kprobe symbols the ' +
+    'generic tracer needs. Verify with: grep unix_stream_recvmsg /proc/kallsyms';
 
-  const formatRate = (rate?: number) => {
-    if (!hasTelemetry) return 'no data';
-    return `${(rate || 0).toFixed(1)} req/s`;
+  // Provenance. Rendered as plain text rather than an icon so the caveat is
+  // visible without hovering - the whole point is that the number is weaker
+  // evidence than a Prometheus histogram quantile.
+  const sourceNote = (source?: MetricSource) => {
+    if (source === 'traces') return 'Derived from sampled traces, not from every request.';
+    if (source === 'estimated') return "Estimated from a peer service's traffic, not observed on this link.";
+    return undefined;
   };
-
-  const formatLatency = (lat?: number) => {
-    if (!hasTelemetry) return 'no data';
-    return `${((lat || 0) * 1000).toFixed(0)} ms`;
+  const sourceTag = (source?: MetricSource) => {
+    if (source === 'traces') return 'trace';
+    if (source === 'estimated') return 'est.';
+    return null;
   };
 
   return (
@@ -99,21 +116,27 @@ export const ServiceNode = memo(({ data, selected }: NodeProps<any>) => {
 
       {/* Bottom metrics row */}
       <div className="grid grid-cols-2 gap-2 pt-2.5 border-t border-slate-800/80 text-sm font-mono">
-        <div title={hasTelemetry ? undefined : noDataHint}>
+        <div title={hasRate ? sourceNote(nodeData.rateSource) : noDataHint}>
           <span className="text-slate-400 text-[10px] uppercase block tracking-wider">Inbound Req</span>
-          <span className={`font-medium ${hasTelemetry ? 'text-slate-200' : 'text-slate-500'}`}>
-            {formatRate(nodeData.rate)}
+          <span className={`font-medium ${hasRate ? 'text-slate-200' : 'text-slate-500'}`}>
+            {hasRate ? `${nodeData.rate!.toFixed(1)} req/s` : 'no data'}
+            {hasRate && sourceTag(nodeData.rateSource) && (
+              <span className="ml-1 text-[9px] font-normal text-slate-500">{sourceTag(nodeData.rateSource)}</span>
+            )}
           </span>
         </div>
 
-        <div className="text-right" title={hasTelemetry ? undefined : noDataHint}>
+        <div className="text-right" title={hasLatency ? sourceNote(nodeData.latencySource) : noDataHint}>
           <span className="text-slate-400 text-[10px] uppercase block tracking-wider">P95 Latency</span>
           <span
             className={`font-medium ${
-              !hasTelemetry ? 'text-slate-500' : isHighLatency ? 'text-amber-400' : 'text-slate-200'
+              !hasLatency ? 'text-slate-500' : isHighLatency ? 'text-amber-400' : 'text-slate-200'
             }`}
           >
-            {formatLatency(nodeData.latencyP95)}
+            {hasLatency ? `${(nodeData.latencyP95! * 1000).toFixed(0)} ms` : 'no data'}
+            {hasLatency && sourceTag(nodeData.latencySource) && (
+              <span className="ml-1 text-[9px] font-normal text-slate-500">{sourceTag(nodeData.latencySource)}</span>
+            )}
           </span>
         </div>
       </div>

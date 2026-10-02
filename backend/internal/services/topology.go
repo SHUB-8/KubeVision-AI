@@ -80,19 +80,34 @@ func (s *TopologyService) GetTopology(ctx context.Context, namespace, window str
 		var totalInboundRate float64
 		var maxLatency float64
 		var totalErrors float64
+		rateSource := ""
+		latencySource := ""
 		for _, e := range edges {
 			if e.Target == node.ID {
 				totalInboundRate += e.Rate
+				if e.Rate > 0 {
+					rateSource = weakerSource(rateSource, e.RateSource)
+				}
 				if e.LatencyP95 > maxLatency {
 					maxLatency = e.LatencyP95
+				}
+				if e.LatencyP95 > 0 {
+					latencySource = weakerSource(latencySource, e.LatencySource)
 				}
 				totalErrors += e.ErrorRate * e.Rate
 			}
 		}
+		// A node's numbers are only populated when it actually received traffic.
+		// Leaving Rate/LatencyP95 at zero with an empty source is what tells the
+		// UI "not measured" instead of "measured as 0 req/s / 0 ms".
 		if totalInboundRate > 0 {
 			node.Rate = totalInboundRate
-			node.LatencyP95 = maxLatency
+			node.RateSource = rateSource
 			node.ErrorRate = totalErrors / totalInboundRate
+			if maxLatency > 0 {
+				node.LatencyP95 = maxLatency
+				node.LatencySource = latencySource
+			}
 		}
 		nodes = append(nodes, node)
 	}
@@ -101,13 +116,15 @@ func (s *TopologyService) GetTopology(ctx context.Context, namespace, window str
 }
 
 type edgeAccumulator struct {
-	source     string
-	target     string
-	protocol   string
-	rate       float64
-	errorRate  float64
-	latencyP95 float64
-	bytesRate  float64
+	source        string
+	target        string
+	protocol      string
+	rate          float64
+	errorRate     float64
+	latencyP95    float64
+	bytesRate     float64
+	rateSource    string
+	latencySource string
 }
 
 type rawMetricEntry struct {
@@ -135,6 +152,35 @@ func parseRateValue(val []interface{}) float64 {
 		}
 	}
 	return 0
+}
+
+// sourceRank orders provenance by strength of evidence. A larger rank is weaker.
+func sourceRank(s string) int {
+	switch s {
+	case models.SourceMetrics:
+		return 0
+	case models.SourceTraces:
+		return 1
+	case models.SourceEstimated:
+		return 2
+	}
+	return -1 // unset
+}
+
+// weakerSource returns whichever source is less trustworthy, so an aggregate
+// never claims better evidence than its weakest input. An unset source means
+// "no contribution" and yields to the other.
+func weakerSource(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" {
+		return a
+	}
+	if sourceRank(b) > sourceRank(a) {
+		return b
+	}
+	return a
 }
 
 func (s *TopologyService) buildEdges(
@@ -171,6 +217,7 @@ func (s *TopologyService) buildEdges(
 			rate := parseRateValue(r.Value)
 			e := getOrCreate(src, target)
 			e.rate += rate
+			e.rateSource = models.SourceMetrics
 			e.protocol = "HTTP/1.1"
 		}
 	}
@@ -190,6 +237,7 @@ func (s *TopologyService) buildEdges(
 			rate := parseRateValue(r.Value)
 			e := getOrCreate(src, target)
 			e.rate += rate
+			e.rateSource = models.SourceMetrics
 			e.protocol = "gRPC"
 		}
 	}
@@ -221,6 +269,47 @@ func (s *TopologyService) buildEdges(
 		s.processFlows(outFlowData, namespace, ipToService, svcProtocols, nodeMap, getOrCreate, edgeMap)
 	}
 
+	// 4b. Layer 1: DB / cache client metrics (Redis RESP, SQL, MongoDB, ...).
+	// A datastore speaks neither HTTP nor gRPC, so no http_*/rpc_* family covers
+	// it. These two queries are the only MEASURED source of rate and latency for
+	// such a dependency - without them the edge falls back to borrowing a peer's
+	// rate (marked "estimated") and reports no latency at all.
+	if dbRateData, err := s.promClient.GetDBClientRates(namespace, window); err == nil {
+		for _, r := range parseMetricEntries(dbRateData) {
+			src := r.Metric["service_name"]
+			serverAddr := r.Metric["server_address"]
+			if src == "" || serverAddr == "" {
+				continue
+			}
+			target := resolveTarget(serverAddr, ipToService)
+			if target == "" || src == target {
+				continue
+			}
+			e := getOrCreate(src, target)
+			e.rate += parseRateValue(r.Value)
+			e.rateSource = models.SourceMetrics
+		}
+	}
+	if dbLatData, err := s.promClient.GetDBClientLatency(namespace, window, "0.95"); err == nil {
+		for _, r := range parseMetricEntries(dbLatData) {
+			src := r.Metric["service_name"]
+			serverAddr := r.Metric["server_address"]
+			if src == "" || serverAddr == "" {
+				continue
+			}
+			target := resolveTarget(serverAddr, ipToService)
+			if target == "" || src == target {
+				continue
+			}
+			if e, ok := edgeMap[src+"->"+target]; ok {
+				if lat := parseRateValue(r.Value); lat > 0 {
+					e.latencyP95 = lat
+					e.latencySource = models.SourceMetrics
+				}
+			}
+		}
+	}
+
 	// 5. Query Client Latency per Edge from Prometheus
 	if latData, err := s.promClient.GetClientLatencyByEdge(namespace, window, "0.95"); err == nil {
 		for _, r := range parseMetricEntries(latData) {
@@ -234,7 +323,10 @@ func (s *TopologyService) buildEdges(
 				continue
 			}
 			if e, ok := edgeMap[src+"->"+target]; ok {
-				e.latencyP95 = parseRateValue(r.Value)
+				if lat := parseRateValue(r.Value); lat > 0 {
+					e.latencyP95 = lat
+					e.latencySource = models.SourceMetrics
+				}
 			}
 		}
 	}
@@ -266,6 +358,7 @@ func (s *TopologyService) buildEdges(
 				for _, e := range edgeMap {
 					if e.target == svc && e.latencyP95 == 0 {
 						e.latencyP95 = lat
+						e.latencySource = models.SourceMetrics
 					}
 				}
 			}
@@ -282,11 +375,32 @@ func (s *TopologyService) buildEdges(
 				for _, e := range edgeMap {
 					if e.target == target && e.latencyP95 == 0 {
 						e.latencyP95 = lat
+						e.latencySource = models.SourceMetrics
 					}
 				}
 			}
 		}
 	}
+
+	// 8b. DELIBERATELY NOT DONE: db_server_operation_duration_seconds.
+	//
+	// It looks like the natural way to give a datastore its own latency, but on
+	// this stack the value is unusable. Measured for redis-cart over the same
+	// 3.09 calls/s that cartservice sees as 0.16 ms:
+	//
+	//   client (cartservice, db_client_*): sum/count = 0.16 ms, p95 = 4.75 ms
+	//   server (redis-cart,  db_server_*): sum/count = 320 ms,  p95 = 1717 ms
+	//
+	// The tell is that sum(rate(db_server_..._sum)) = 0.99 SECONDS PER SECOND -
+	// the timer is effectively running continuously - and the implied "duration"
+	// equals 1/request-rate (1/3.0877 = 0.324 s vs 0.320 s measured). That is the
+	// signature of a request paired with the NEXT response, so the histogram
+	// reports the inter-arrival gap rather than the operation duration.
+	//
+	// A number we have positive evidence to distrust is worse than no number:
+	// the client-side metric above already covers this edge with a credible
+	// value, so the server-side one is dropped rather than shown. Re-check the
+	// arithmetic above before wiring it back in.
 
 	// 9. Query Inbound Server Rates to enrich uninstrumented caller edges (e.g. loadgenerator -> frontend)
 	srvRateMap := make(map[string]float64)
@@ -332,23 +446,29 @@ func (s *TopologyService) buildEdges(
 		}
 
 		// If L7 rate was 0 (e.g. client without Beyla probe, or DB with RESP/TCP),
-		// fall back to the operational rate of the connected peer
+		// fall back to the operational rate of the connected peer. This is an
+		// INFERENCE, not a measurement of this edge, so it is labelled
+		// "estimated" - the UI must not present it as observed traffic.
 		if e.rate == 0 {
 			if targetRate, ok := srvRateMap[e.target]; ok && targetRate > 0 {
 				e.rate = targetRate
+				e.rateSource = models.SourceEstimated
 			} else if srcRate, ok := srvRateMap[e.source]; ok && srcRate > 0 {
 				e.rate = srcRate
+				e.rateSource = models.SourceEstimated
 			}
 		}
 
 		edges = append(edges, models.Edge{
-			ID:         fmt.Sprintf("e%d", edgeID),
-			Source:     e.source,
-			Target:     e.target,
-			Protocol:   e.protocol,
-			Rate:       e.rate,
-			ErrorRate:  e.errorRate,
-			LatencyP95: e.latencyP95,
+			ID:            fmt.Sprintf("e%d", edgeID),
+			Source:        e.source,
+			Target:        e.target,
+			Protocol:      e.protocol,
+			Rate:          e.rate,
+			ErrorRate:     e.errorRate,
+			LatencyP95:    e.latencyP95,
+			RateSource:    e.rateSource,
+			LatencySource: e.latencySource,
 		})
 		edgeID++
 	}

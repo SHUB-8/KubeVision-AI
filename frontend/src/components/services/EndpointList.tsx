@@ -55,6 +55,14 @@ export const EndpointList: React.FC<EndpointListProps> = ({ endpoints, loading }
                 </td>
                 <td className="p-3 text-right text-slate-200">
                   {ep.rate.toFixed(2)}/s
+                  {ep.rateSource === 'traces' && (
+                    <span
+                      className="ml-1 text-[9px] text-slate-500"
+                      title="Derived from sampled traces, not a full request count."
+                    >
+                      trace
+                    </span>
+                  )}
                 </td>
                 <td className={`p-3 text-right font-semibold ${hasErrors ? 'text-rose-400' : 'text-slate-400'}`}>
                   {(ep.errorRate * 100).toFixed(1)}%
@@ -64,6 +72,14 @@ export const EndpointList: React.FC<EndpointListProps> = ({ endpoints, loading }
                 </td>
                 <td className={`p-3 text-right font-semibold ${isSlowP95 ? 'text-amber-400' : 'text-slate-200'}`}>
                   {(ep.latencyP95 * 1000).toFixed(1)} ms
+                  {ep.latencySource === 'traces' && (
+                    <span
+                      className="ml-1 text-[9px] font-normal text-slate-500"
+                      title="Derived from sampled traces, not a full request count."
+                    >
+                      trace
+                    </span>
+                  )}
                 </td>
                 <td className="p-3 text-right text-slate-400">
                   {(ep.latencyP99 * 1000).toFixed(1)} ms

@@ -6,6 +6,17 @@ export interface HealthResponse {
   k8s: string;
 }
 
+/**
+ * Where a number came from. A p95 computed from a handful of sampled spans and
+ * a histogram_quantile over every request on the wire are not the same evidence
+ * and must not look identical on screen.
+ *   metrics   - measured by eBPF/Beyla, read from Prometheus (full request stream)
+ *   traces    - derived by the backend from sampled Tempo spans
+ *   estimated - borrowed from a peer's measured rate, not observed on this edge
+ * Absent (undefined) means "no data" and must render as such, never as 0.
+ */
+export type MetricSource = 'metrics' | 'traces' | 'estimated';
+
 export interface Node {
   id: string;
   label: string;
@@ -15,6 +26,8 @@ export interface Node {
   rate?: number;
   errorRate?: number;
   latencyP95?: number;
+  rateSource?: MetricSource;
+  latencySource?: MetricSource;
   labels?: Record<string, string>;
 }
 
@@ -26,6 +39,8 @@ export interface Edge {
   rate?: number;
   errorRate?: number;
   latencyP95?: number;
+  rateSource?: MetricSource;
+  latencySource?: MetricSource;
   /** True on links from the static fallback map (no peer telemetry). */
   inferred?: boolean;
 }
@@ -56,6 +71,8 @@ export interface Endpoint {
   latencyP99: number;
   rate: number;
   errorRate: number;
+  rateSource?: MetricSource;
+  latencySource?: MetricSource;
 }
 
 export interface Span {

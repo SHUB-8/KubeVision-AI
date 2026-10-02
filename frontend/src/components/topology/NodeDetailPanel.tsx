@@ -153,11 +153,31 @@ export const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
                   <div className="grid grid-cols-3 gap-1 pt-1.5 border-t border-slate-700/40 text-[10px] font-mono">
                     <div>
                       <span className="text-slate-400 block">Rate</span>
-                      <span className="text-slate-200">{ep.rate.toFixed(2)}/s</span>
+                      <span className="text-slate-200">
+                        {ep.rate.toFixed(2)}/s
+                        {ep.rateSource === 'traces' && (
+                          <span
+                            className="ml-1 text-[9px] text-slate-500"
+                            title="Derived from sampled traces, not a full request count."
+                          >
+                            trace
+                          </span>
+                        )}
+                      </span>
                     </div>
                     <div>
                       <span className="text-slate-400 block">P95</span>
-                      <span className="text-slate-200">{(ep.latencyP95 * 1000).toFixed(0)} ms</span>
+                      <span className="text-slate-200">
+                        {(ep.latencyP95 * 1000).toFixed(0)} ms
+                        {ep.latencySource === 'traces' && (
+                          <span
+                            className="ml-1 text-[9px] text-slate-500"
+                            title="Derived from sampled traces, not a full request count."
+                          >
+                            trace
+                          </span>
+                        )}
+                      </span>
                     </div>
                     <div>
                       <span className="text-slate-400 block">P99</span>

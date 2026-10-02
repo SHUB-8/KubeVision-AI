@@ -1,0 +1,129 @@
+# OpenTelemetry Collector - OTLP gateway for SDK-instrumented applications.
+#
+# ROLE IN THIS STACK
+#   Beyla (eBPF) is the source of ALL RED metrics, and it is scraped by
+#   Prometheus directly from :8999 - the collector is NOT in that path.
+#   The collector exists for exactly one purpose: to receive OTLP traces from
+#   SDK-instrumented apps and forward them to Tempo, where they provide the
+#   deep in-process spans eBPF physically cannot see (JVM/V8/CLR internals).
+#
+# WHY THERE IS NO METRICS PIPELINE HERE
+#   There used to be one: a spanmetrics connector + metricstransform that
+#   renamed OTel-SDK metrics to Beyla's conventions, exported via
+#   prometheusremotewrite. It never delivered a single series, because
+#   Prometheus was never started with --web.enable-remote-write-receiver and
+#   every batch was dropped with HTTP 404. Two reasons not to bring it back:
+#     1. It is redundant - Beyla already emits rpc_server_call_duration_seconds
+#        natively for every language (verified: 12/12 services).
+#     2. It is actively dangerous - the rename produced the SAME metric name
+#        Beyla uses, so enabling the remote-write receiver would double-count
+#        every non-Go RED metric.
+#   If you ever need per-span-derived metrics again, prefer Tempo's
+#   metrics-generator, which does not collide with Beyla's names.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: monitoring
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      batch:
+        timeout: 5s
+        send_batch_size: 1024
+
+    exporters:
+      # Traces -> Tempo. Verified working; this is the collector's whole job.
+      otlphttp/tempo:
+        endpoint: http://tempo.monitoring.svc.cluster.local:4318
+        tls:
+          insecure: true
+
+      # OTLP logs -> Loki, for apps that emit logs over OTLP. Container logs
+      # are shipped separately by Fluent Bit.
+      loki:
+        endpoint: http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push
+        tls:
+          insecure: true
+
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [otlphttp/tempo]
+        logs:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [loki]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: monitoring
+  labels:
+    app: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+        - name: collector
+          image: otel/opentelemetry-collector-contrib:0.119.0
+          args:
+            - --config=/etc/otel/config.yaml
+          ports:
+            - containerPort: 4317
+              name: otlp-grpc
+            - containerPort: 4318
+              name: otlp-http
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - mountPath: /etc/otel
+              name: config
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: monitoring
+  labels:
+    app: otel-collector
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+      protocol: TCP
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+      protocol: TCP

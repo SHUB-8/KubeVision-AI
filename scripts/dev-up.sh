@@ -56,6 +56,15 @@ stop_backend() {
     pkill -f "bin/kubevision-backend" 2>/dev/null && echo "  backend stopped" || echo "  backend not running"
   fi
   rm -f "$RUN_DIR/backend.pid"
+
+  # A backend started from another shell/session lives in a different sandbox
+  # PID namespace, so neither the pid file nor pkill can reach it. Say so
+  # instead of reporting success and silently reloading nothing.
+  if probe "${PORT:-8090}"; then
+    echo "  WARNING: port ${PORT:-8090} is still held by a backend this shell cannot see."
+    echo "           Stop it in the session that started it, or reload will keep"
+    echo "           serving the old binary."
+  fi
 }
 
 stop_frontend() {
@@ -104,10 +113,13 @@ build_backend() {
 }
 
 start_backend() {
+  local port="${PORT:-8090}"
+  local db_path="${DB_PATH:-./data/kubevision-dev}"
+
   if [ "$FOREGROUND" = true ]; then
-    LOG "Starting backend on :8090 (foreground)"
-    PORT=8090 \
-    DB_PATH=./data/kubevision-dev \
+    LOG "Starting backend on :$port (foreground)"
+    PORT="$port" \
+    DB_PATH="$db_path" \
     PROMETHEUS_URL=http://localhost:9090 \
     LOKI_URL=http://localhost:3100 \
     TEMPO_URL=http://localhost:3200 \
@@ -116,9 +128,9 @@ start_backend() {
       exec ./bin/kubevision-backend
   fi
 
-  LOG "Starting backend on :8090 (logs: $RUN_DIR/backend.log)"
-  PORT=8090 \
-  DB_PATH=./data/kubevision-dev \
+  LOG "Starting backend on :$port (logs: $RUN_DIR/backend.log)"
+  PORT="$port" \
+  DB_PATH="$db_path" \
   PROMETHEUS_URL=http://localhost:9090 \
   LOKI_URL=http://localhost:3100 \
   TEMPO_URL=http://localhost:3200 \
@@ -128,9 +140,20 @@ start_backend() {
   echo $! > "$RUN_DIR/backend.pid"
 
   for _ in $(seq 1 20); do
-    curl -sf -m 2 localhost:8090/api/v1/health >/dev/null 2>&1 && break
+    curl -sf -m 2 "localhost:$port/api/v1/health" >/dev/null 2>&1 && break
     sleep 0.5
   done
+
+  # A health check alone does NOT prove the reload worked: a backend left
+  # running by another shell already holds the port and the Badger lock, so
+  # this new process can die instantly while /api/v1/health keeps answering
+  # from the OLD binary. Verify the process we just launched is still alive.
+  if ! alive "$RUN_DIR/backend.pid"; then
+    echo "  ERROR: the backend exited during startup - still serving the OLD binary."
+    echo "  Last lines of $RUN_DIR/backend.log:"
+    tail -n 5 "$RUN_DIR/backend.log" 2>/dev/null | tr -d '\0' | sed 's/^/    /'
+    return 1
+  fi
 }
 
 restart_backend() {

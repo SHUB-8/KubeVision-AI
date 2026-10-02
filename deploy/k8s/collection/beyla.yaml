@@ -67,11 +67,24 @@ spec:
 # or discovery selectors - see Config.appO11yEnabled in the Beyla source).
 # Env vars can't express the services list, so selection lives in this file.
 #
-# Instrumentation coverage: eBPF uprobes work out of the box for Go services.
-# Java/Node.js/Python/.NET processes are discovered but emit no RED metrics
-# until the OTel SDK is injected into them (Beyla's SDK injector webhook or
-# the OpenTelemetry Operator). Known gap for the polyglot boutique demo: only
-# frontend/productcatalog/checkout/shipping (Go) report metrics today.
+# Instrumentation coverage: Beyla instruments every supported language on its
+# own - no SDK injection required. Verified on this cluster: 12/12 boutique
+# services report RED metrics (Go, Python, Node, .NET and Java alike).
+# Go is instrumented with uprobes; every other runtime goes through the generic
+# network tracer, which attaches kprobes BY KERNEL SYMBOL NAME.
+#
+# HOST REQUIREMENT (this is what silently breaks non-Go coverage):
+# kernels built with Clang LTO/ThinLTO mangle internal symbol names, so a
+# Required kprobe such as `unix_stream_recvmsg` cannot attach and Beyla aborts
+# the ENTIRE generic tracer. Go services keep reporting while every non-Go
+# service goes dark - with no error surfaced anywhere in the UI.
+# Observed on CachyOS `linux-cachyos` >= 6.11.2 (ThinLTO default since Oct 2024);
+# its GCC-built `linux-cachyos-lts` / `linux-cachyos-gcc` variants are unaffected.
+#
+# Preflight before trusting any new node (all three must pass):
+#   test -f /sys/kernel/btf/vmlinux                                              # BTF required (CO-RE)
+#   grep -cE ' (unix_stream_recvmsg|__x64_unix_stream_recvmsg)$' /proc/kallsyms  # 0 => LTO => non-Go dead
+#   cat /sys/kernel/security/lockdown                                            # must show [none]
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -130,10 +143,32 @@ spec:
             # Prometheus scrape endpoint (scraped via the ServiceMonitor below)
             - name: BEYLA_PROMETHEUS_PORT
               value: "8999"
-            # Metric groups: RED metrics, service graph metrics, network flows
+            # Metric groups: RED metrics, span metrics, service graph, network flows
             # https://grafana.com/docs/beyla/latest/configure/export-data/
+            #
+            # application_span is REQUIRED for application_service_graph to emit
+            # anything. The graph is computed from Beyla's own generated spans, so
+            # with the graph group enabled but the span group missing, the feature
+            # is silently empty - no error, no warning, just zero series.
+            # Verified on this cluster: 0 traces_service_graph_* families without
+            # application_span, 8 families + 10 real edges with it.
             - name: BEYLA_PROMETHEUS_FEATURES
-              value: "application,application_service_graph,network"
+              value: "application,application_span,application_service_graph,network"
+            # Trace-context propagation BETWEEN processes. Without it every
+            # SDK-injected span is its own root trace: Tempo fills up with
+            # single-span fragments and nothing is a real distributed trace
+            # (measured 0/22 multi-service traces before, deep 6-service chains
+            # after). Library-level injection into Go binaries is the part that
+            # connects frontend's calls to the SDK services.
+            #
+            # The network-level injector is governed by Beyla itself: on kernels
+            # with the FIONREAD sockhash bug (commit 929e30f93125 - observed on
+            # this 6.18 LTS) it logs an ERROR and disables just that piece rather
+            # than risk stalling or truncating application reads. That log line
+            # is expected here, and is only detectable because /sys/kernel/tracing
+            # is mounted (see volumes below).
+            - name: BEYLA_BPF_CONTEXT_PROPAGATION
+              value: "all"
             # Decorate metrics/traces with k8s.namespace.name / k8s.pod.name /
             # ... resource attributes. REQUIRED: the backend's PromQL filters
             # on the k8s_namespace_name label.
@@ -159,6 +194,13 @@ spec:
               name: bpffs
             - mountPath: /sys/kernel/debug
               name: sys-debug
+            # Required by the docs for the FIONREAD kernel-bug mitigation and for
+            # network-level context propagation (BEYLA_BPF_CONTEXT_PROPAGATION).
+            # Without them those code paths cannot run at all.
+            - mountPath: /sys/fs/cgroup
+              name: cgroup
+            - mountPath: /sys/kernel/tracing
+              name: tracefs
       volumes:
         - name: config
           configMap:
@@ -173,3 +215,9 @@ spec:
         - name: sys-debug
           hostPath:
             path: /sys/kernel/debug
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+        - name: tracefs
+          hostPath:
+            path: /sys/kernel/tracing

@@ -16,6 +16,7 @@ import {
 } from '@xyflow/react';
 import { useApp } from '../../context/AppContext';
 import { api } from '../../services/api';
+import type { MetricSource } from '../../types/api';
 import { ServiceNode } from './ServiceNode';
 
 // Dagre layered layout with responsive direction and viewport-adaptive spacing.
@@ -219,6 +220,21 @@ export const DependencyGraph: React.FC = () => {
         const svc = serviceMap.get(node.id);
         const pos = positions.get(node.id) ?? { x: 0, y: 0 };
 
+        // Never coalesce an absent value to 0: undefined means "not measured"
+        // and must stay distinguishable from a measured zero on the card.
+        const rate = node.rate || svc?.rate || undefined;
+        const rateSource: MetricSource | undefined = node.rate
+          ? node.rateSource
+          : rate
+            ? 'metrics'
+            : undefined;
+        const latencyP95 = node.latencyP95 || svc?.latencyP95 || undefined;
+        const latencySource: MetricSource | undefined = node.latencyP95
+          ? node.latencySource
+          : latencyP95
+            ? 'metrics'
+            : undefined;
+
         return {
           id: node.id,
           type: 'serviceNode',
@@ -227,9 +243,11 @@ export const DependencyGraph: React.FC = () => {
             label: node.label || node.id,
             type: node.type,
             namespace: node.namespace || activeNamespace,
-            rate: node.rate || svc?.rate || 0,
-            errorRate: node.errorRate ?? svc?.errorRate ?? 0,
-            latencyP95: node.latencyP95 || svc?.latencyP95 || 0,
+            rate,
+            errorRate: node.errorRate ?? svc?.errorRate ?? undefined,
+            latencyP95,
+            rateSource,
+            latencySource,
             status: svc?.status || 'Running',
             replicas: svc?.replicas || 1,
             ready: svc?.ready || 1,
@@ -247,7 +265,11 @@ export const DependencyGraph: React.FC = () => {
         } else {
           const parts: string[] = [];
           if (edge.protocol) parts.push(edge.protocol);
-          if (edge.rate && edge.rate > 0) parts.push(`${edge.rate.toFixed(1)} req/s`);
+          // "(est.)" flags a rate inferred from a peer's traffic rather than
+          // observed on this link - it must not read as measured.
+          if (edge.rate && edge.rate > 0) {
+            parts.push(`${edge.rate.toFixed(1)} req/s${edge.rateSource === 'estimated' ? ' (est.)' : ''}`);
+          }
           if (edge.latencyP95 && edge.latencyP95 > 0) parts.push(`${(edge.latencyP95 * 1000).toFixed(1)}ms`);
           if (edge.errorRate && edge.errorRate > 0) parts.push(`${(edge.errorRate * 100).toFixed(1)}% err`);
           edgeLabel = parts.join(' • ');
