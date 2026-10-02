@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -248,14 +249,6 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 	namespace := c.DefaultQuery("namespace", h.defaultNamespace)
 	window := c.DefaultQuery("window", "5m")
 
-	// Request rate per endpoint. A failure here means Prometheus is
-	// unreachable - report it instead of an empty list.
-	rateData, err := h.promClient.GetEndpointMetrics(namespace, name, window)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
 	endpointMap := make(map[string]*models.Endpoint)
 	getEndpoint := func(r metricEntry) *models.Endpoint {
 		// HTTP endpoints are keyed by route+verb; gRPC methods carry
@@ -264,6 +257,9 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 		method := r.Metric["http_request_method"]
 		if path == "" {
 			path = r.Metric["rpc_method"]
+		}
+		if method == "" {
+			method = "RPC"
 		}
 		key := path + ":" + method
 		ep, exists := endpointMap[key]
@@ -274,19 +270,21 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 		return ep
 	}
 
-	for _, r := range parseMetricEntries(rateData) {
-		getEndpoint(r).Rate = entryValue(r)
+	// 1. HTTP request rate from Prometheus (server or client calling this service)
+	if rateData, err := h.promClient.GetEndpointMetrics(namespace, name, window); err == nil {
+		for _, r := range parseMetricEntries(rateData) {
+			getEndpoint(r).Rate += entryValue(r)
+		}
 	}
-	// gRPC call rate (same service, different metric family).
+
+	// 2. gRPC call rate from Prometheus (server or client calling this service)
 	if data, err := h.promClient.GetEndpointRPCMetrics(namespace, name, window); err == nil {
 		for _, r := range parseMetricEntries(data) {
 			getEndpoint(r).Rate += entryValue(r)
 		}
 	}
 
-	// Error rate (5xx fraction) and latency quantiles degrade silently -
-	// an endpoint with traffic but no 5xx series has no error entry, which
-	// just means 0.
+	// 3. Error rates
 	if data, err := h.promClient.GetEndpointErrors(namespace, name, window); err == nil {
 		for _, r := range parseMetricEntries(data) {
 			getEndpoint(r).ErrorRate = entryValue(r)
@@ -298,6 +296,7 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 		}
 	}
 
+	// 4. Latency quantiles
 	quantiles := []struct {
 		q     string
 		get   func(ep *models.Endpoint) float64
@@ -308,13 +307,11 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 		{"0.99", func(ep *models.Endpoint) float64 { return ep.LatencyP99 }, func(ep *models.Endpoint, v float64) { ep.LatencyP99 = v }},
 	}
 	for _, q := range quantiles {
-		// HTTP first: it is authoritative for endpoints that have it.
 		if data, err := h.promClient.GetEndpointLatency(namespace, name, window, q.q); err == nil {
 			for _, r := range parseMetricEntries(data) {
 				q.field(getEndpoint(r), entryValue(r))
 			}
 		}
-		// gRPC buckets only fill quantiles HTTP left empty (per field).
 		if data, err := h.promClient.GetEndpointRPCLatency(namespace, name, window, q.q); err == nil {
 			for _, r := range parseMetricEntries(data) {
 				ep := getEndpoint(r)
@@ -325,10 +322,44 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 		}
 	}
 
+	// 5. Supplement endpoints and latencies discovered via Tempo distributed tracing
+	if tempoEndpoints, err := h.tempoClient.GetEndpointsForService(c.Request.Context(), name); err == nil {
+		for _, tep := range tempoEndpoints {
+			key := tep.Path + ":" + tep.Method
+			ep, exists := endpointMap[key]
+			if !exists {
+				tepCopy := tep
+				endpointMap[key] = &tepCopy
+			} else {
+				if ep.LatencyP95 == 0 && tep.LatencyP95 > 0 {
+					ep.LatencyP50 = tep.LatencyP50
+					ep.LatencyP95 = tep.LatencyP95
+					ep.LatencyP99 = tep.LatencyP99
+				}
+				if ep.Rate == 0 && tep.Rate > 0 {
+					ep.Rate = tep.Rate
+				}
+			}
+		}
+	}
+
+	// 6. Strict filter: drop any residual health check or trace export operations
 	endpoints := make([]models.Endpoint, 0, len(endpointMap))
 	for _, ep := range endpointMap {
+		lowerPath := strings.ToLower(ep.Path)
+		if strings.Contains(lowerPath, "health") || strings.Contains(lowerPath, "_healthz") || strings.Contains(lowerPath, "traceservice/export") {
+			continue
+		}
 		endpoints = append(endpoints, *ep)
 	}
+
+	// 7. If no active traffic observed in window, dynamically query Kubernetes service ports
+	if len(endpoints) == 0 && h.k8sClient != nil {
+		if declared, err := h.k8sClient.GetDeclaredServiceEndpoints(namespace, name); err == nil && len(declared) > 0 {
+			endpoints = declared
+		}
+	}
+
 	c.JSON(http.StatusOK, endpoints)
 }
 
@@ -420,11 +451,25 @@ func (h *Handlers) GetClusterInfo(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	pods, err := h.k8sClient.GetPods(h.defaultNamespace)
+	namespace := c.DefaultQuery("namespace", h.defaultNamespace)
+	pods, err := h.k8sClient.GetPods(namespace)
 	if err == nil {
 		info.Pods = pods
 	}
 	c.JSON(http.StatusOK, info)
+}
+
+func (h *Handlers) GetNamespaces(c *gin.Context) {
+	if h.k8sClient == nil {
+		c.JSON(http.StatusOK, []string{h.defaultNamespace})
+		return
+	}
+	list, err := h.k8sClient.GetNamespaces()
+	if err != nil {
+		c.JSON(http.StatusOK, []string{h.defaultNamespace})
+		return
+	}
+	c.JSON(http.StatusOK, list)
 }
 
 func (h *Handlers) GetBaselines(c *gin.Context) {

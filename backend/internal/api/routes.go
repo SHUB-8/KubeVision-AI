@@ -34,6 +34,7 @@ func SetupRoutes(store *storage.Store, k8sClient *k8s.Client, promClient *promet
 		api.GET("/config", handlers.GetConfig)
 		api.PUT("/config", handlers.UpdateConfig)
 		api.GET("/cluster", handlers.GetClusterInfo)
+		api.GET("/namespaces", handlers.GetNamespaces)
 	}
 
 	return router

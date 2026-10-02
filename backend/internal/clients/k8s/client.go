@@ -163,6 +163,33 @@ func (c *Client) GetPodIPs(namespace string) (map[string]string, error) {
 	return ipMap, nil
 }
 
+// GetDeclaredServiceEndpoints dynamically inspects the Kubernetes Service spec for any namespace and service,
+// returning declared ports and protocols without any hardcoded service names.
+func (c *Client) GetDeclaredServiceEndpoints(namespace, serviceName string) ([]models.Endpoint, error) {
+	ctx, cancel := c.ctx()
+	defer cancel()
+
+	svc, err := c.clientset.CoreV1().Services(namespace).Get(ctx, serviceName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	var endpoints []models.Endpoint
+	for _, port := range svc.Spec.Ports {
+		proto := DetectProtocolFromPort(port.Name, port.AppProtocol, port.Port)
+		path := fmt.Sprintf(":%d", port.Port)
+		if port.Name != "" {
+			path = fmt.Sprintf(":%d (%s)", port.Port, port.Name)
+		}
+		endpoints = append(endpoints, models.Endpoint{
+			Service: serviceName,
+			Path:    path,
+			Method:  proto,
+		})
+	}
+	return endpoints, nil
+}
+
 func (c *Client) GetServicePortProtocols(namespace string) (map[string]string, error) {
 	ctx, cancel := c.ctx()
 	defer cancel()

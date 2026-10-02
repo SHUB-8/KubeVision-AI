@@ -6,7 +6,7 @@
 # auto-instrumentation and context propagation.
 #
 # Usage:
-#   scripts/demo-app.sh install        # deploy boutique + configure OpenTelemetry
+#   scripts/demo-app.sh install        # deploy boutique + auto-detect & configure OpenTelemetry
 #   scripts/demo-app.sh otel           # re-apply OpenTelemetry instrumentation only
 #   scripts/demo-app.sh status         # inspect running demo pods
 #   scripts/demo-app.sh scale 0        # pause demo (frees ~1.5GB RAM; stops loadgen)
@@ -19,6 +19,44 @@ cd "$(dirname "$0")/.."
 
 NS=boutique
 MANIFEST_URL="${BOUTIQUE_MANIFEST_URL:-https://raw.githubusercontent.com/GoogleCloudPlatform/microservices-demo/v0.10.7/release/kubernetes-manifests.yaml}"
+
+detect_runtime() {
+  local deploy="$1"
+  local json="$2"
+
+  # Convert inspectable json to lowercase
+  local lower
+  lower=$(echo "$json" | tr '[:upper:]' '[:lower:]')
+
+  # Skip load generators / locust to avoid gevent monkeypatch conflicts
+  if echo "$deploy $lower" | grep -Eq 'loadgenerator|locust|jmeter|k6'; then
+    echo "skip_loadgenerator"
+    return
+  fi
+
+  if echo "$lower" | grep -Eq 'java|openjdk|temurin|corretto|\.jar'; then
+    echo "java"
+    return
+  fi
+  if echo "$lower" | grep -Eq 'dotnet|coreclr|aspnet|\.dll'; then
+    echo "dotnet"
+    return
+  fi
+  if echo "$lower" | grep -Eq 'node|npm|yarn|express|\.js'; then
+    echo "nodejs"
+    return
+  fi
+  if echo "$lower" | grep -Eq 'python|pip|gunicorn|uvicorn|\.py'; then
+    echo "python"
+    return
+  fi
+  if echo "$lower" | grep -Eq 'golang|go '; then
+    echo "go"
+    return
+  fi
+
+  echo "unknown"
+}
 
 configure_otel() {
   echo ""
@@ -52,45 +90,64 @@ spec:
     - b3
   sampler:
     type: parentbased_always_on
+  env:
+    - name: OTEL_PYTHON_EXCLUDED_URLS
+      value: ".*health.*"
+    - name: OTEL_NODEJS_EXCLUDED_URLS
+      value: ".*health.*"
+    - name: OTEL_DOTNET_AUTO_EXCLUDED_URLS
+      value: ".*health.*"
 EOF
 
-  # 3. Patch Pod template annotations for non-Go polyglot services
-  echo "--- Patching pod templates with language-specific OTel annotations ---"
+  # 3. Dynamic runtime detection and OpenTelemetry instrumentation
+  echo "--- Inspecting deployments in ns/$NS for automatic instrumentation ---"
 
-  patch_otel() {
-    local deploy="$1"
-    local lang="$2"
-    if kubectl get deploy -n "$NS" "$deploy" >/dev/null 2>&1; then
-      echo "  Configuring $deploy -> $lang"
-      kubectl patch deploy -n "$NS" "$deploy" --type=merge -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"instrumentation.opentelemetry.io/inject-${lang}\":\"true\"}}}}}"
-    fi
-  }
+  local target_deploys=()
+  mapfile -t target_deploys < <(kubectl get deploy -n "$NS" -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n')
 
-  patch_otel "adservice" "java"
-  patch_otel "cartservice" "dotnet"
-  patch_otel "paymentservice" "nodejs"
-  patch_otel "currencyservice" "nodejs"
-  patch_otel "emailservice" "python"
-  patch_otel "recommendationservice" "python"
+  local patched_deploys=()
 
-  # 4. Enable OTel context propagation on Go services
-  echo "--- Enabling native OpenTelemetry context propagation on Go services ---"
-  for deploy in frontend checkoutservice productcatalogservice shippingservice; do
-    if kubectl get deploy -n "$NS" "$deploy" >/dev/null 2>&1; then
-      kubectl set env deploy/"$deploy" -n "$NS" \
-        ENABLE_TRACING=1 \
-        OTEL_SERVICE_NAME="$deploy" \
-        COLLECTOR_SERVICE_ADDR="tempo.monitoring.svc.cluster.local:4317" >/dev/null 2>&1 || true
-    fi
+  for deploy in "${target_deploys[@]}"; do
+    [ -z "$deploy" ] && continue
+
+    local deploy_json
+    deploy_json=$(kubectl get deploy -n "$NS" "$deploy" -o jsonpath='{.spec.template.spec.containers[*].image} {.spec.template.spec.containers[*].command} {.spec.template.spec.containers[*].args} {.spec.template.spec.containers[*].env}' 2>/dev/null || echo "")
+
+    local runtime
+    runtime=$(detect_runtime "$deploy" "$deploy_json")
+
+    case "$runtime" in
+      java|dotnet|nodejs|python)
+        echo "  [Auto-detected $runtime] Injecting OTel instrumentation into deploy/$deploy..."
+        kubectl patch deploy -n "$NS" "$deploy" --type=merge -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"instrumentation.opentelemetry.io/inject-${runtime}\":\"true\"}}}}}"
+        patched_deploys+=("$deploy")
+        ;;
+      go)
+        echo "  [Auto-detected Go] Configuring standard OpenTelemetry endpoints for deploy/$deploy..."
+        kubectl set env deploy/"$deploy" -n "$NS" \
+          ENABLE_TRACING=1 \
+          OTEL_SERVICE_NAME="$deploy" \
+          COLLECTOR_SERVICE_ADDR="tempo.monitoring.svc.cluster.local:4317" \
+          OTEL_EXPORTER_OTLP_ENDPOINT="http://tempo.monitoring.svc.cluster.local:4318" >/dev/null 2>&1 || true
+        patched_deploys+=("$deploy")
+        ;;
+      skip_loadgenerator)
+        echo "  [Traffic Generator] Preserving native client engine for deploy/$deploy (traced via server & eBPF network flows)."
+        ;;
+      *)
+        echo "  [Generic/Native] Service deploy/$deploy (traced automatically via Beyla eBPF)."
+        ;;
+    esac
   done
 
   echo ""
   echo "=== OpenTelemetry Auto-Instrumentation successfully configured! ==="
-  echo "Watching rollout of instrumented services..."
-  kubectl rollout status deploy/adservice -n "$NS" --timeout=180s || true
-  kubectl rollout status deploy/paymentservice -n "$NS" --timeout=180s || true
-  kubectl rollout status deploy/currencyservice -n "$NS" --timeout=180s || true
-  kubectl rollout status deploy/frontend -n "$NS" --timeout=180s || true
+  if [ ${#patched_deploys[@]} -gt 0 ]; then
+    echo "Watching rollout of instrumented services..."
+    for deploy in "${patched_deploys[@]}"; do
+      kubectl rollout status deploy/"$deploy" -n "$NS" --timeout=60s || true
+    done
+  fi
 }
 
 case "${1:-}" in
@@ -104,7 +161,7 @@ case "${1:-}" in
     echo "--- Waiting for frontend service to be ready ---"
     kubectl -n "$NS" rollout status deploy/frontend --timeout=300s
 
-    # Automatically apply OTel instrumentation
+    # Automatically apply dynamic OTel instrumentation
     configure_otel
 
     echo ""

@@ -126,4 +126,9 @@ export const api = {
     const res = await fetch(`${BASE_URL}/cluster`);
     return handleResponse<ClusterInfo>(res);
   },
+
+  async getNamespaces(): Promise<string[]> {
+    const res = await fetch(`${BASE_URL}/namespaces`);
+    return handleResponse<string[]>(res).then((d) => d ?? []);
+  },
 };

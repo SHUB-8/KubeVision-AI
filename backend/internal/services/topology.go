@@ -288,15 +288,6 @@ func (s *TopologyService) buildEdges(
 		}
 	}
 
-	// Ensure DB/Cache edges have realistic measured latency (e.g. Redis RESP ~0.8ms)
-	for _, e := range edgeMap {
-		if strings.Contains(e.protocol, "Redis") || strings.Contains(e.protocol, "RESP") {
-			if e.latencyP95 == 0 {
-				e.latencyP95 = 0.0008
-			}
-		}
-	}
-
 	// 9. Query Inbound Server Rates to enrich uninstrumented caller edges (e.g. loadgenerator -> frontend)
 	srvRateMap := make(map[string]float64)
 	if srvRatesRaw, err := s.promClient.GetServiceRates(namespace, window); err == nil {
@@ -329,7 +320,7 @@ func (s *TopologyService) buildEdges(
 			continue
 		}
 
-		// Dynamically resolve protocol if still unset
+		// Dynamically resolve protocol from Kubernetes declared service ports if still unset
 		if e.protocol == "" {
 			if p, ok := svcProtocols[e.target]; ok && p != "" {
 				e.protocol = p
@@ -395,6 +386,12 @@ func (s *TopologyService) processFlows(
 		target := resolveTarget(dstRaw, ipToService)
 		if source == "" || target == "" || source == target {
 			continue
+		}
+
+		if isDatabaseOrCache(source) && !isDatabaseOrCache(target) {
+			source, target = target, source
+		} else if isTrafficGenerator(target) && !isTrafficGenerator(source) {
+			source, target = target, source
 		}
 
 		byteRate := parseRateValue(r.Value)
@@ -469,3 +466,25 @@ func isSystemWorkload(name string) bool {
 	}
 	return false
 }
+
+func isDatabaseOrCache(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.Contains(lower, "redis") ||
+		strings.Contains(lower, "postgres") ||
+		strings.Contains(lower, "mysql") ||
+		strings.Contains(lower, "mongo") ||
+		strings.Contains(lower, "mariadb") ||
+		strings.Contains(lower, "cassandra") ||
+		strings.Contains(lower, "memcached") ||
+		strings.Contains(lower, "database") ||
+		strings.Contains(lower, "cache")
+}
+
+func isTrafficGenerator(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.Contains(lower, "loadgenerator") ||
+		strings.Contains(lower, "locust") ||
+		strings.Contains(lower, "jmeter") ||
+		strings.Contains(lower, "k6")
+}
+
