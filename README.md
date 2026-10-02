@@ -25,6 +25,7 @@ UI in one process.
 | `./scripts/dev-up.sh reload --all` | Reload backend/frontend AND re-apply in-cluster configs to update pods |
 | `./scripts/dev-up.sh status` | Health status of backend, forwards, and cluster pods |
 | `./scripts/dev-up.sh stop` | Stop host dev processes |
+| `./scripts/enable-otel.sh <namespace>` | Auto-instrument any application/namespace with OpenTelemetry |
 | `./scripts/stack.sh pause` / `resume` | Free (~2-4GB RAM) / restore in-cluster monitoring stack |
 | `./scripts/stack.sh disk` | View PVC usage, pod CPU/RAM, and retention settings |
 | `./scripts/demo-app.sh scale 0` / `status` | Pause / inspect the observed demo app |

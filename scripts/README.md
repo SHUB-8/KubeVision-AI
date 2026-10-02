@@ -24,6 +24,9 @@ Then open **http://localhost:8090** — that's the whole product.
 ./scripts/dev-up.sh status       # Status of backend, forwards, and cluster pods
 ./scripts/dev-up.sh stop         # Stop backend, vite, and port-forwards
 
+./scripts/enable-otel.sh [ns]    # Auto-instrument ANY namespace with OpenTelemetry
+./scripts/enable-otel.sh ns svc  # Auto-instrument specific deployment
+
 ./scripts/stack.sh pause         # End of day: free ~2-4GB RAM (scales stores to 0, removes DSes)
 ./scripts/stack.sh resume        # Resume monitoring stores and DaemonSets
 ./scripts/stack.sh status        # Inspect workloads in ns/monitoring
@@ -40,7 +43,8 @@ Then open **http://localhost:8090** — that's the whole product.
 | Layer | Script | Description |
 |---|---|---|
 | Cluster & Observability Stack | `setup.sh` | Bootstraps k3s & deploys Prometheus, Loki, Fluent Bit, Tempo, Beyla |
-| Observed App (boutique demo) | `demo-app.sh` | Manages ns/boutique workload and OpenTelemetry auto-instrumentation |
+| App Telemetry / Instrumentation | `enable-otel.sh` | Auto-detects runtimes & injects OTel auto-instrumentation into **any** namespace |
+| Observed Sample App | `demo-app.sh` | Manages ns/boutique workload and delegates OTel setup to `enable-otel.sh` |
 | In-cluster Stack Lifecycle | `stack.sh` | Pause/resume RAM, disk usage, and data cleanup for ns/monitoring |
 | Host Dev Processes | `dev-up.sh` | **The only script that runs host processes** (port-forwards, Go backend, Vite/UI) |
 
