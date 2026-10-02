@@ -154,21 +154,36 @@ spec:
             # application_span, 8 families + 10 real edges with it.
             - name: BEYLA_PROMETHEUS_FEATURES
               value: "application,application_span,application_service_graph,network"
-            # Trace-context propagation BETWEEN processes. Without it every
-            # SDK-injected span is its own root trace: Tempo fills up with
-            # single-span fragments and nothing is a real distributed trace
-            # (measured 0/22 multi-service traces before, deep 6-service chains
-            # after). Library-level injection into Go binaries is the part that
-            # connects frontend's calls to the SDK services.
+            # Trace-context propagation BETWEEN processes. Library-level injection
+            # into Go binaries is the part that connects Beyla-only callers to
+            # SDK-instrumented callees.
             #
-            # The network-level injector is governed by Beyla itself: on kernels
-            # with the FIONREAD sockhash bug (commit 929e30f93125 - observed on
-            # this 6.18 LTS) it logs an ERROR and disables just that piece rather
-            # than risk stalling or truncating application reads. That log line
-            # is expected here, and is only detectable because /sys/kernel/tracing
-            # is mounted (see volumes below).
+            # MUST STAY "disabled" on this stack: the Go services now run their
+            # own OTel SDK (ENABLE_TRACING=1 via scripts/setup-phase2.sh), and
+            # Beyla auto-disables its own span export for those processes - but
+            # the network-level injector keeps writing traceparent headers that
+            # reference spans Beyla no longer exports. On HTTP/2/gRPC Beyla
+            # cannot see that the app SDK already wrote its own header, so the
+            # two injectors race; when Beyla's wins, the callee joins a trace
+            # whose parent span is never stored ("orphan": parentSpanId set,
+            # parent span missing). Measured on this cluster with propagation
+            # "all": adservice 12/12 orphans, cartservice 16/16, recommendation
+            # 13/13, currency 0% stitched. With "disabled": ZERO orphans and
+            # 100% stitching on every SDK-to-SDK edge (currency went 0% -> 100%,
+            # productcatalog 38/38, adservice/cart/rec all stitched).
+            #
+            # Trade-off: loadgenerator (Python, no SDK) -> frontend no longer
+            # stitches (library-level propagation is Go-only), so the loadgen
+            # client span becomes its own single-span root trace. Every
+            # application-internal edge stitches, which is what RCA needs.
+            #
+            # The FIONREAD sockhash bug (commit 929e30f93125 - observed on this
+            # 6.18 LTS) only affects the network-level injector, so with
+            # propagation disabled the tracefs mount below is no longer
+            # required for correctness; it is kept because mounting is harmless
+            # and future Beyla features may need it.
             - name: BEYLA_BPF_CONTEXT_PROPAGATION
-              value: "all"
+              value: "disabled"
             # Decorate metrics/traces with k8s.namespace.name / k8s.pod.name /
             # ... resource attributes. REQUIRED: the backend's PromQL filters
             # on the k8s_namespace_name label.

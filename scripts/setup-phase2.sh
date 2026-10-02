@@ -156,7 +156,7 @@ detect_runtime() {
     echo "python"
     return
   fi
-  if echo "$lower" | grep -Eq 'golang|go '; then
+  if echo "$lower" | grep -Eq 'golang|go |microservices-demo/(frontend|checkoutservice|productcatalogservice|shippingservice)'; then
     echo "go"
     return
   fi
