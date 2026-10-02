@@ -7,9 +7,9 @@ Cluster + stack lifecycle for the single-node k3s dev box. Run from repo root.
 Fresh machine, three commands, in order:
 
 ```bash
-./scripts/setup.sh           # 1. k3s cluster + observability stack (idempotent)
-./scripts/demo-app.sh install # 2. boutique demo app + OpenTelemetry auto-instrumentation
-./scripts/dev-up.sh          # 3. port-forwards + backend + UI
+./scripts/setup.sh            # 1. k3s cluster + observability stack + OTel operator (idempotent)
+./scripts/demo-app.sh install  # 2. boutique demo app + OpenTelemetry auto-instrumentation
+./scripts/dev-up.sh           # 3. port-forwards + backend + UI
 ```
 
 Then open **http://localhost:8090** — that's the whole product.
@@ -24,8 +24,8 @@ Then open **http://localhost:8090** — that's the whole product.
 ./scripts/dev-up.sh status       # Status of backend, forwards, and cluster pods
 ./scripts/dev-up.sh stop         # Stop backend, vite, and port-forwards
 
-./scripts/enable-otel.sh [ns]    # Auto-instrument ANY namespace with OpenTelemetry
-./scripts/enable-otel.sh ns svc  # Auto-instrument specific deployment
+./scripts/setup.sh --instrument [ns]    # Auto-instrument ANY namespace with OpenTelemetry
+./scripts/setup.sh --instrument ns svc  # Auto-instrument specific deployment
 
 ./scripts/stack.sh pause         # End of day: free ~2-4GB RAM (scales stores to 0, removes DSes)
 ./scripts/stack.sh resume        # Resume monitoring stores and DaemonSets
@@ -42,9 +42,8 @@ Then open **http://localhost:8090** — that's the whole product.
 
 | Layer | Script | Description |
 |---|---|---|
-| Cluster & Observability Stack | `setup.sh` | Bootstraps k3s & deploys Prometheus, Loki, Fluent Bit, Tempo, Beyla |
-| App Telemetry / Instrumentation | `enable-otel.sh` | Auto-detects runtimes & injects OTel auto-instrumentation into **any** namespace |
-| Observed Sample App | `demo-app.sh` | Manages ns/boutique workload and delegates OTel setup to `enable-otel.sh` |
+| Cluster, Observability & Telemetry | `setup.sh` | Bootstraps k3s, deploys stores (Prometheus/Loki/Tempo/Beyla/FluentBit/OTel), and instruments namespaces |
+| Observed Sample App | `demo-app.sh` | Manages ns/boutique workload and delegates OTel setup to `setup.sh --instrument` |
 | In-cluster Stack Lifecycle | `stack.sh` | Pause/resume RAM, disk usage, and data cleanup for ns/monitoring |
 | Host Dev Processes | `dev-up.sh` | **The only script that runs host processes** (port-forwards, Go backend, Vite/UI) |
 
