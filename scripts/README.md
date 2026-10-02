@@ -4,73 +4,64 @@ Cluster + stack lifecycle for the single-node k3s dev box. Run from repo root.
 
 ## Quickstart — running everything
 
-Fresh machine, four commands, in order:
+Fresh machine, three commands, in order:
 
 ```bash
-./scripts/setup-phase1.sh        # 1. k3s cluster            (once per machine)
-./scripts/setup-phase2.sh        # 2. observability stack    (Prometheus/Loki/Tempo/Beyla/FluentBit)
-./scripts/demo-app.sh install    # 3. boutique demo app      (the observed workload)
-./scripts/dev-up.sh              # 4. port-forwards + backend + UI
+./scripts/setup.sh           # 1. k3s cluster + observability stack (idempotent)
+./scripts/demo-app.sh install # 2. boutique demo app + OpenTelemetry auto-instrumentation
+./scripts/dev-up.sh          # 3. port-forwards + backend + UI
 ```
 
 Then open **http://localhost:8090** — that's the whole product.
 
-Day-to-day (nothing here is order-sensitive except pause → dev-up):
+## Day-to-day
 
 ```bash
-./scripts/dev-up.sh              # back after reboot; idempotent, safe to re-run
-./scripts/dev-up.sh --dev        # same, but vite hot-reload instead of built UI
-./scripts/pause.sh stop          # end of day: free the RAM (in-cluster stores only)
-./scripts/pause.sh start && ./scripts/dev-up.sh   # resume — pause kills the
-                                                 # port-forwards, dev-up restores them
-./scripts/demo-app.sh scale 0    # pause the demo app itself (loadgen traffic stops)
-./scripts/cleanup.sh             # disk usage + retention report
+./scripts/dev-up.sh              # Start dev environment (safe to re-run)
+./scripts/dev-up.sh --dev        # Start with Vite hot-reload dev server (:5173)
+./scripts/dev-up.sh reload       # Rebuild & restart backend + frontend (reloads code changes)
+./scripts/dev-up.sh reload --all # Reload host AND re-apply in-cluster configs to update pods
+./scripts/dev-up.sh status       # Status of backend, forwards, and cluster pods
+./scripts/dev-up.sh stop         # Stop backend, vite, and port-forwards
+
+./scripts/stack.sh pause         # End of day: free ~2-4GB RAM (scales stores to 0, removes DSes)
+./scripts/stack.sh resume        # Resume monitoring stores and DaemonSets
+./scripts/stack.sh status        # Inspect workloads in ns/monitoring
+./scripts/stack.sh disk          # Inspect node disk, PVCs, pod CPU/RAM, and retention settings
+./scripts/stack.sh nuke          # Emergency: restart stores and wipe emptyDir data
+
+./scripts/demo-app.sh scale 0    # Pause the demo app itself (loadgen traffic stops)
+./scripts/demo-app.sh scale 1    # Resume demo app
+./scripts/demo-app.sh status     # Check demo app pods
 ```
 
 ## Who owns what (boundaries)
 
-| Layer | Owner | Notes |
+| Layer | Script | Description |
 |---|---|---|
-| Cluster itself (k3s) | `setup-phase1.sh` | once per machine |
-| In-cluster observability stack | `setup-phase2.sh` (install/upgrade) · `pause.sh` (pause/resume) · `cleanup.sh` (disk) | only touches ns/monitoring |
-| Observed app (boutique demo) | `demo-app.sh` | only script that touches ns/boutique |
-| Host dev processes (port-forwards, backend, UI) | `dev-up.sh` | **the only script that runs anything on the host** |
+| Cluster & Observability Stack | `setup.sh` | Bootstraps k3s & deploys Prometheus, Loki, Fluent Bit, Tempo, Beyla |
+| Observed App (boutique demo) | `demo-app.sh` | Manages ns/boutique workload and OpenTelemetry auto-instrumentation |
+| In-cluster Stack Lifecycle | `stack.sh` | Pause/resume RAM, disk usage, and data cleanup for ns/monitoring |
+| Host Dev Processes | `dev-up.sh` | **The only script that runs host processes** (port-forwards, Go backend, Vite/UI) |
 
 Common questions, answered explicitly:
 
-- **`pause.sh` does not run the backend or the UI.** It only scales the
+- **`stack.sh pause` does not run the backend or the UI.** It only scales the
   monitoring stores in-cluster. Your local backend, port-forwards and vite
-  are host processes - only `dev-up.sh` starts/stops those.
-- **`pause.sh` does not touch boutique** (the observed app). Pause that
+  are host processes — only `dev-up.sh` starts/stops those.
+- **`stack.sh pause` does not touch boutique** (the observed app). Pause that
   separately with `scripts/demo-app.sh scale 0`.
-- `dev-up.sh` never reconfigures the in-cluster stack; if the stack is
-  missing it delegates to `setup-phase2.sh`.
-
-## Scripts
-
-| Order | Script | What it does |
-|---|---|---|
-| 1 | `./scripts/setup-phase1.sh` | Bootstrap k3s (once per machine) |
-| 2 | `./scripts/setup-phase2.sh` | Install/upgrade the observability stack (Prometheus, Loki, Fluent Bit via Helm values files in `deploy/helm/`; Tempo + Beyla via raw manifests in `deploy/k8s/collection/`) |
-| 3 | `./scripts/demo-app.sh install` | Apply the observed app (Google microservices-demo) into ns/boutique |
-| 4 | `./scripts/dev-up.sh` | Forwards + backend + UI on the host (`--dev` = vite, `--rebuild` = rebuild) |
-
-## Day-to-day
-
-```bash
-./scripts/pause.sh stop      # free ~2-4GB RAM: scale stores to 0, remove DaemonSets
-./scripts/pause.sh start     # bring the stack back
-./scripts/pause.sh status    # what's running
-
-./scripts/cleanup.sh         # disk usage per store + retention audit
-./scripts/cleanup.sh --nuke  # emergency: restart stores, wipes emptyDir data
-```
+- `dev-up.sh` checks if in-cluster stores are running; if missing, it delegates
+  to `setup.sh --stack`.
+- **Reloading code vs pods**:
+  - Code changes in Go or React? Run `./scripts/dev-up.sh reload` (or use `./scripts/dev-up.sh --dev` for Vite live HMR).
+  - Helm values or collection YAML changes? Run `./scripts/dev-up.sh reload --all` or `./scripts/setup.sh --stack`.
 
 ## Where configuration lives
 
-- **Helm values** (charts): `deploy/helm/{prometheus,loki,fluent-bit}-values.yaml` — retention, storage mode, caches. Edit + re-run `setup-phase2.sh`.
-- **Raw manifests** (no chart): `deploy/k8s/collection/{tempo,beyla}.yaml` — Tempo config, Beyla privileges/env. Edit + `kubectl apply -f`.
-- **Backend env vars** (when running locally): `PORT`, `PROMETHEUS_URL`, `LOKI_URL`, `TEMPO_URL`, `DB_PATH`, `OBSERVED_NAMESPACE` (namespace of the observed app; default `boutique`), `FRONTEND_DIR`.
+- **Helm values** (charts): `deploy/helm/{prometheus,loki,fluent-bit}-values.yaml` — retention, storage mode, caches. Edit + re-run `./scripts/setup.sh --stack`.
+- **Raw manifests** (no chart): `deploy/k8s/collection/{tempo,beyla}.yaml` — Tempo config, Beyla privileges/env. Edit + `kubectl apply -f` (or `./scripts/setup.sh --stack`).
+- **Backend env vars** (when running locally): `PORT`, `PROMETHEUS_URL`, `LOKI_URL`, `TEMPO_URL`, `DB_PATH`, `OBSERVED_NAMESPACE` (default `boutique`), `FRONTEND_DIR`.
 
 ## When you're done for the day
 
@@ -78,18 +69,3 @@ Common questions, answered explicitly:
 sudo systemctl stop k3s      # frees everything; PVCs + manifests survive
 sudo systemctl start k3s     # pods come back on their own
 ```
-
-## Dev port-forwards (local backend only)
-
-The Go backend running on your machine reaches the stores through localhost
-port-forwards. `pause.sh stop` kills them with the pods; `start` does NOT
-bring them back. After resuming, re-run:
-
-```bash
-kubectl -n monitoring port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090 &
-kubectl -n monitoring port-forward svc/loki-gateway 3100:80 &
-kubectl -n monitoring port-forward svc/tempo 3200:3200 &
-```
-
-Symptom when forgotten: the status bar shows Prometheus/Loki/Tempo as
-disconnected. Verify with `curl localhost:8090/api/v1/health`.

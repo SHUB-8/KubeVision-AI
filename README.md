@@ -7,10 +7,9 @@ serving a React UI.
 ## Run it
 
 ```bash
-./scripts/setup-phase1.sh        # 1. k3s cluster            (once per machine)
-./scripts/setup-phase2.sh        # 2. observability stack    (Prometheus/Loki/Tempo/Beyla/FluentBit)
-./scripts/demo-app.sh install    # 3. boutique demo app      (the observed workload)
-./scripts/dev-up.sh              # 4. port-forwards + backend + UI
+./scripts/setup.sh           # 1. k3s cluster + observability stack (idempotent)
+./scripts/demo-app.sh install # 2. boutique demo app + OTel auto-instrumentation
+./scripts/dev-up.sh          # 3. port-forwards + backend + UI
 ```
 
 Open **http://localhost:8090**. That's the whole product — backend, API and
@@ -20,13 +19,17 @@ UI in one process.
 
 | Command | What |
 |---|---|
-| `./scripts/dev-up.sh` | bring the dev environment back (idempotent) |
-| `./scripts/dev-up.sh --dev` | vite hot-reload instead of the built UI |
-| `./scripts/pause.sh stop` / `start` | free / restore cluster RAM (monitoring stack only) |
-| `./scripts/demo-app.sh scale 0` / `status` | pause / inspect the demo app |
-| `./scripts/cleanup.sh` | disk usage + retention report |
+| `./scripts/dev-up.sh` | Bring the dev environment back (idempotent) |
+| `./scripts/dev-up.sh --dev` | Vite hot-reload instead of built UI (`:5173`) |
+| `./scripts/dev-up.sh reload` | Rebuild & restart backend + frontend (reloads code changes) |
+| `./scripts/dev-up.sh reload --all` | Reload backend/frontend AND re-apply in-cluster configs to update pods |
+| `./scripts/dev-up.sh status` | Health status of backend, forwards, and cluster pods |
+| `./scripts/dev-up.sh stop` | Stop host dev processes |
+| `./scripts/stack.sh pause` / `resume` | Free (~2-4GB RAM) / restore in-cluster monitoring stack |
+| `./scripts/stack.sh disk` | View PVC usage, pod CPU/RAM, and retention settings |
+| `./scripts/demo-app.sh scale 0` / `status` | Pause / inspect the observed demo app |
 
-After `pause.sh start`, re-run `dev-up.sh` — pausing kills the port-forwards.
+After `./scripts/stack.sh resume`, run `./scripts/dev-up.sh` to restore port-forwards.
 
-Full runbook with the ownership map of every script:
+Full runbook:
 [scripts/README.md](scripts/README.md)

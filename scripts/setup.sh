@@ -1,13 +1,20 @@
 #!/bin/bash
 # ==============================================================================
-# KubeVision AI — Phase 1 Setup Script
-# Bootstraps a single-node k3s cluster for development on Linux & Windows (WSL).
-# Verifies prerequisites (kernel, eBPF/BTF, cgroups) and configures kubeconfig.
-# Idempotent: safe to run multiple times without disrupting existing state.
+# KubeVision AI — Unified Cluster & Observability Setup Script
+#
+# Bootstraps a single-node k3s cluster (Linux/WSL2) and installs the complete
+# observability stack: Prometheus, Loki, Fluent Bit, Grafana Tempo, and Beyla (eBPF).
+#
+# Usage:
+#   ./scripts/setup.sh          # Full bootstrap: k3s cluster + observability stack
+#   ./scripts/setup.sh --stack  # Observability stack only (Prometheus, Loki, Tempo, Beyla)
+#
+# Fully idempotent: safe to run multiple times without disrupting existing state.
 # ==============================================================================
 set -euo pipefail
+cd "$(dirname "$0")/.."
 
-# ANSI color codes for readable output
+# ANSI color codes
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -105,11 +112,6 @@ apply_platform_tweaks() {
   if [ "$IS_WSL" = true ]; then
     log_info "Applying WSL2 compatibility configurations..."
 
-    # Fix Docker Desktop space issue in /proc/mounts
-    # When Docker Desktop is installed in 'C:\Program Files\Docker\Docker',
-    # /proc/mounts contains spaces in option fields, causing Kubelet's
-    # ContainerManager validation to crash with:
-    # "system validation failed - wrong number of fields (expected 6, got 7)"
     if grep -q "Program Files" /proc/mounts 2>/dev/null; then
       log_info "Unmounting Docker Desktop host mount (/Docker/host) to prevent Kubelet cAdvisor crashes..."
       run_sudo umount /Docker/host 2>/dev/null || true
@@ -154,7 +156,6 @@ EOF
     fi
     log_success "Created /etc/rancher/k3s/config.yaml."
   else
-    # Ensure fail-cgroupv1=false is present (required for K8s >= 1.31 on hybrid cgroup systems)
     if ! grep -q "fail-cgroupv1" "$CONFIG_FILE" 2>/dev/null; then
       log_info "Adding fail-cgroupv1=false to /etc/rancher/k3s/config.yaml..."
       if ! grep -q "kubelet-arg:" "$CONFIG_FILE" 2>/dev/null; then
@@ -164,7 +165,6 @@ EOF
       fi
     fi
 
-    # Ensure WSL node IP is included in TLS SANs
     if [ -n "$NODE_IP" ] && ! grep -q "$NODE_IP" "$CONFIG_FILE" 2>/dev/null; then
       if ! grep -q "tls-san:" "$CONFIG_FILE" 2>/dev/null; then
         echo -e "tls-san:\n  - \"127.0.0.1\"\n  - \"localhost\"\n  - \"$NODE_IP\"" | run_sudo tee -a "$CONFIG_FILE" >/dev/null
@@ -197,13 +197,11 @@ install_or_start_k3s() {
     fi
   fi
 
-  # Ensure kubectl symlink exists pointing to k3s
   if ! command -v kubectl >/dev/null 2>&1 && [ -f /usr/local/bin/k3s ]; then
     log_info "Creating /usr/local/bin/kubectl symlink to k3s..."
     run_sudo ln -sf /usr/local/bin/k3s /usr/local/bin/kubectl
   fi
 
-  # Ensure helm is available in PATH (symlink from snap if present)
   if ! command -v helm >/dev/null 2>&1 && [ -f /snap/bin/helm ]; then
     run_sudo ln -sf /snap/bin/helm /usr/local/bin/helm
   fi
@@ -277,31 +275,115 @@ wait_for_cluster() {
     kubectl get nodes
     exit 1
   fi
-
   log_success "Cluster node is Ready."
-  echo ""
-  kubectl get nodes -o wide
-  echo ""
+}
 
-  log_info "Active system workloads in kube-system:"
-  kubectl -n kube-system get pods --no-headers 2>/dev/null || true
+install_observability_stack() {
+  log_info "=== Deploying KubeVision Observability Stack ==="
+
+  log_info "Creating monitoring namespace..."
+  kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+
+  log_info "Adding and updating Helm Repositories..."
+  helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+  helm repo add grafana https://grafana.github.io/helm-charts
+  helm repo add fluent https://fluent.github.io/helm-charts
+  helm repo update
+
+  log_info "Ensuring Prometheus Operator CRDs (server-side apply)..."
+  CRD_DIR=$(mktemp -d)
+  trap 'rm -rf "$CRD_DIR"' EXIT
+  helm pull prometheus-community/kube-prometheus-stack --untar --untardir="$CRD_DIR"
+  CRD_SRC="$CRD_DIR/kube-prometheus-stack/charts/crds/crds"
+  [ -d "$CRD_SRC" ] || CRD_SRC="$CRD_DIR/kube-prometheus-stack/crds"
+  kubectl apply --server-side --force-conflicts -f "$CRD_SRC"
+  rm -rf "$CRD_DIR"
+  trap - EXIT
+
+  log_info "Installing / upgrading kube-prometheus-stack..."
+  helm upgrade --install prometheus prometheus-community/kube-prometheus-stack \
+    --namespace monitoring \
+    -f deploy/helm/prometheus-values.yaml
+
+  log_info "Installing / upgrading Loki..."
+  helm upgrade --install loki grafana/loki \
+    --namespace monitoring \
+    -f deploy/helm/loki-values.yaml
+
+  log_info "Installing / upgrading Fluent Bit (log collection DaemonSet)..."
+  helm upgrade --install fluent-bit fluent/fluent-bit \
+    --namespace monitoring \
+    -f deploy/helm/fluent-bit-values.yaml
+
+  log_info "Deploying Grafana Tempo (distributed tracing backend)..."
+  kubectl apply -f deploy/k8s/collection/tempo.yaml
+
+  log_info "Deploying Grafana Beyla (eBPF telemetry DaemonSet)..."
+  kubectl apply -f deploy/k8s/collection/beyla.yaml
+
+  echo ""
+  log_info "Waiting for collection stack workloads to become ready..."
+
+  echo "  > Waiting for Tempo deployment..."
+  kubectl -n monitoring rollout status deploy/tempo --timeout=180s
+
+  echo "  > Waiting for Prometheus statefulset..."
+  kubectl -n monitoring rollout status statefulset/prometheus-prometheus-kube-prometheus-prometheus --timeout=300s
+
+  echo "  > Waiting for Loki statefulset..."
+  kubectl -n monitoring rollout status statefulset/loki --timeout=300s
+
+  echo "  > Waiting for Fluent Bit DaemonSet..."
+  kubectl -n monitoring rollout status ds/fluent-bit --timeout=180s
+
+  echo "  > Waiting for Beyla eBPF DaemonSet..."
+  kubectl -n monitoring rollout status ds/beyla --timeout=180s
 
   echo ""
   log_success "=========================================================="
-  log_success " Phase 1 complete! K3s cluster is operational and healthy."
-  log_success " Next: Run the observability stack installation:"
-  log_success "   ./scripts/setup-phase2.sh"
+  log_success " KubeVision Observability stack is live and operational!"
   log_success "=========================================================="
+  echo ""
+  echo "Workloads in 'monitoring' namespace:"
+  kubectl -n monitoring get pods -o wide
+  echo ""
+  echo "Telemetry endpoints (in-cluster):"
+  echo "  Prometheus:  http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090"
+  echo "  Loki:        http://loki-gateway.monitoring.svc:80 (or http://loki.monitoring.svc:3100)"
+  echo "  Tempo:       http://tempo.monitoring.svc:3200 (OTLP: :4317/:4318)"
+  echo "  Beyla:       http://beyla.monitoring.svc:8999/metrics"
+  echo ""
 }
 
-main() {
-  detect_environment
-  check_prerequisites
-  apply_platform_tweaks
-  configure_k3s
-  install_or_start_k3s
-  setup_kubeconfig
-  wait_for_cluster
-}
+# --- Main Dispatcher ----------------------------------------------------------
+TARGET="${1:-all}"
 
-main "$@"
+case "$TARGET" in
+  --stack|--phase2|--phase-2|stack)
+    install_observability_stack
+    ;;
+  all|--all|"")
+    detect_environment
+    check_prerequisites
+    apply_platform_tweaks
+    configure_k3s
+    install_or_start_k3s
+    setup_kubeconfig
+    wait_for_cluster
+    install_observability_stack
+    echo "Next: Deploy demo app and launch dashboard:"
+    echo "  ./scripts/demo-app.sh install"
+    echo "  ./scripts/dev-up.sh"
+    ;;
+  -h|--help)
+    echo "Usage: $0 [--stack]"
+    echo "  (no args)  Full cluster bootstrap + observability stack deployment"
+    echo "  --stack    Deploy or update observability stack only (Helm & manifests)"
+    exit 0
+    ;;
+  *)
+    log_error "Unknown option: $TARGET"
+    echo "Usage: $0 [--stack]"
+    exit 1
+    ;;
+esac
