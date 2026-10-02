@@ -7,9 +7,10 @@ serving a React UI.
 ## Run it
 
 ```bash
-./scripts/setup.sh            # 1. k3s cluster + observability stack + OTel operator (idempotent)
-./scripts/demo-app.sh install  # 2. boutique demo app + auto-instrumentation
-./scripts/dev-up.sh           # 3. port-forwards + backend + UI
+./scripts/setup-phase1.sh     # 1. k3s cluster bootstrap (skip if you already have a cluster)
+./scripts/setup-phase2.sh     # 2. observability stack + OTel operator (Prometheus/Loki/Tempo/Beyla)
+./scripts/demo-app.sh install # 3. boutique demo app + auto-instrumentation
+./scripts/dev-up.sh           # 4. port-forwards + backend + UI
 ```
 
 Open **http://localhost:8090**. That's the whole product — backend, API and
@@ -25,7 +26,7 @@ UI in one process.
 | `./scripts/dev-up.sh reload --all` | Reload backend/frontend AND re-apply in-cluster configs to update pods |
 | `./scripts/dev-up.sh status` | Health status of backend, forwards, and cluster pods |
 | `./scripts/dev-up.sh stop` | Stop host dev processes |
-| `./scripts/setup.sh --instrument <ns>` | Auto-instrument any namespace with OpenTelemetry |
+| `./scripts/setup-phase2.sh --instrument <ns>` | Auto-instrument any namespace with OpenTelemetry |
 | `./scripts/stack.sh pause` / `resume` | Free (~2-4GB RAM) / restore in-cluster monitoring stack |
 | `./scripts/stack.sh disk` | View PVC usage, pod CPU/RAM, and retention settings |
 | `./scripts/demo-app.sh scale 0` / `status` | Pause / inspect the observed demo app |

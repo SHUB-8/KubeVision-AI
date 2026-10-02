@@ -167,7 +167,7 @@ start_frontend_dev() {
 
 sync_cluster_stack() {
   LOG "Applying in-cluster observability stack..."
-  ./scripts/setup.sh --stack
+  ./scripts/setup-phase2.sh
 }
 
 ensure_cluster_stack() {

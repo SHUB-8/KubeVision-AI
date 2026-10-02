@@ -3,10 +3,10 @@
 # KubeVision AI — Observed Demo Application (Google microservices-demo)
 #
 # Manages the boutique demo workload in ns/boutique.
-# Calls scripts/setup.sh --instrument to automatically apply OpenTelemetry instrumentation.
+# Calls scripts/setup-phase2.sh --instrument to automatically apply OpenTelemetry instrumentation.
 #
 # Usage:
-#   scripts/demo-app.sh install        # deploy boutique + auto-instrument via setup.sh --instrument
+#   scripts/demo-app.sh install        # deploy boutique + auto-instrument via setup-phase2.sh --instrument
 #   scripts/demo-app.sh otel           # re-apply OpenTelemetry instrumentation only
 #   scripts/demo-app.sh status         # inspect running demo pods
 #   scripts/demo-app.sh scale 0        # pause demo (frees ~1.5GB RAM; stops loadgen)
@@ -32,7 +32,7 @@ case "${1:-}" in
     kubectl -n "$NS" rollout status deploy/frontend --timeout=300s
 
     echo "--- Enabling OpenTelemetry Auto-Instrumentation ---"
-    ./scripts/setup.sh --instrument "$NS"
+    ./scripts/setup-phase2.sh --instrument "$NS"
 
     echo ""
     echo "Demo app is up! Loadgenerator is generating traffic."
@@ -45,7 +45,7 @@ case "${1:-}" in
       echo "Namespace '$NS' not found. Run: $0 install"
       exit 1
     fi
-    ./scripts/setup.sh --instrument "$NS"
+    ./scripts/setup-phase2.sh --instrument "$NS"
     ;;
 
   status)
