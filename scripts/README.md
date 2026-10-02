@@ -31,8 +31,10 @@ Then open **http://localhost:8090** — that's the whole product.
 ./scripts/stack.sh pause         # End of day: free ~2-4GB RAM (scales stores to 0, removes DSes)
 ./scripts/stack.sh resume        # Resume monitoring stores and DaemonSets
 ./scripts/stack.sh status        # Inspect workloads in ns/monitoring
-./scripts/stack.sh disk          # Inspect node disk, PVCs, pod CPU/RAM, and retention settings
 ./scripts/stack.sh nuke          # Emergency: restart stores and wipe emptyDir data
+./scripts/stack.sh nuke-loki     # Wipe Loki PVC data (restarts with fresh PVC)
+./scripts/stack.sh purge         # Total purge: delete namespace, all PVCs, and node disk
+./scripts/cleanup-monitoring.sh  # Standalone total purge script (-y to skip prompt)
 
 ./scripts/demo-app.sh scale 0    # Pause the demo app itself (loadgen traffic stops)
 ./scripts/demo-app.sh scale 1    # Resume demo app

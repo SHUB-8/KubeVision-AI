@@ -13,7 +13,8 @@
 #   scripts/stack.sh status     # Inspect workloads in ns/monitoring
 #   scripts/stack.sh disk       # View disk consumption & retention config
 #   scripts/stack.sh nuke       # Delete Prometheus/Tempo pods to wipe emptyDir data
-#   scripts/stack.sh nuke-loki  # Wipe Loki PVC data (dev only!)
+#   scripts/stack.sh nuke-loki  # Wipe Loki PVC data (restarts with fresh PVC)
+#   scripts/stack.sh purge      # Total purge: namespace, all PVCs, and node disk
 # ==============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -104,13 +105,18 @@ nuke_stores() {
 }
 
 nuke_loki() {
-  echo "--- Wiping Loki PVC data (dev only! all logs are lost) ---"
+  echo "--- Wiping Loki PVC data (scaling down, deleting PVC, restarting) ---"
   kubectl -n "$NS" scale sts loki --replicas=0
   kubectl -n "$NS" wait --for=delete pod/loki-0 --timeout=60s || true
-  kubectl -n "$NS" exec loki-0 -c loki -- sh -c 'rm -rf /var/loki/*' 2>/dev/null \
-    || echo "(loki-0 stopped; PVC dir on node: sudo rm -rf /var/lib/rancher/k3s/storage/pvc-*_monitoring_storage-loki-0-*)"
+  kubectl -n "$NS" delete pvc storage-loki-0 --ignore-not-found
   kubectl -n "$NS" scale sts loki --replicas=1
   kubectl -n "$NS" rollout status sts/loki --timeout=120s
+  echo "Loki restarted with fresh PVC."
+}
+
+purge_stack() {
+  shift || true
+  ./scripts/cleanup-monitoring.sh "$@"
 }
 
 case "${1:-}" in
@@ -132,9 +138,12 @@ case "${1:-}" in
   nuke-loki)
     nuke_loki
     ;;
+  purge|nuke-all|clean-all)
+    purge_stack "$@"
+    ;;
   -h|--help)
     cat << EOF
-Usage: $0 {pause|resume|status|disk|nuke|nuke-loki}
+Usage: $0 {pause|resume|status|disk|nuke|nuke-loki|purge}
 
 Commands:
   pause       Scale stores to 0, remove DaemonSets to free ~2-4GB RAM
@@ -142,11 +151,12 @@ Commands:
   status      Show current pods, daemonsets, and statefulsets in ns/monitoring
   disk        Show disk usage in pods and node local-path PVCs
   nuke        Emergency emptyDir wipe (restarts Prometheus & Tempo fresh)
-  nuke-loki   Wipe Loki PVC data (dev only!)
+  nuke-loki   Wipe Loki PVC data (restarts with fresh PVC)
+  purge       Total purge: delete namespace, all PVCs, and node disk storage
 EOF
     ;;
   *)
-    echo "Usage: $0 {pause|resume|status|disk|nuke|nuke-loki}"
+    echo "Usage: $0 {pause|resume|status|disk|nuke|nuke-loki|purge}"
     exit 1
     ;;
 esac
