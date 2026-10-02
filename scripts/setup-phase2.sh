@@ -201,6 +201,13 @@ spec:
   sampler:
     type: parentbased_always_on
   env:
+    # The collector intentionally has NO metrics pipeline (Beyla is the single
+    # metrics source, scraped by Prometheus). Without this, the Java agent
+    # still defaults OTEL_METRICS_EXPORTER=otlp and spams "Failed to export
+    # metrics ... 404 page not found" once a minute forever - the data was
+    # never collected anyway, so disabling loses nothing.
+    - name: OTEL_METRICS_EXPORTER
+      value: "none"
     - name: OTEL_PYTHON_EXCLUDED_URLS
       value: ".*health.*"
     - name: OTEL_NODEJS_EXCLUDED_URLS
