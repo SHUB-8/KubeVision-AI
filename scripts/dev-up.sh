@@ -84,7 +84,10 @@ ensure_forwards() {
       started="$started $!"
     fi
   done
-  [ -n "$started" ] && { LOG "Started forwards:$started"; sleep 3; }
+  if [ -n "$started" ]; then
+    LOG "Started forwards:$started"
+    sleep 3
+  fi
 }
 
 restart_forwards() {
