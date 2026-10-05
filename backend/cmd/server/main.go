@@ -17,6 +17,7 @@ import (
 	"github.com/kubevision/backend/internal/clients/prometheus"
 	"github.com/kubevision/backend/internal/clients/tempo"
 	"github.com/kubevision/backend/internal/storage"
+	"github.com/kubevision/backend/models"
 )
 
 func main() {
@@ -49,7 +50,12 @@ func main() {
 	// endpoints when the request omits ?namespace=
 	defaultNamespace := os.Getenv("OBSERVED_NAMESPACE")
 	if defaultNamespace == "" {
-		defaultNamespace = "boutique"
+		defaultNamespace = models.DefaultNamespace
+	}
+
+	clusterName := os.Getenv("CLUSTER_NAME")
+	if clusterName == "" {
+		clusterName = models.DefaultCluster
 	}
 
 	log.Println("KubeVision Backend starting...")
@@ -73,7 +79,7 @@ func main() {
 	lokiClient := loki.NewClient(lokiURL)
 	tempoClient := tempo.NewClient(tempoURL)
 
-	k8sClient, err := k8s.NewClient()
+	k8sClient, err := k8s.NewClient(clusterName)
 	if err != nil {
 		log.Printf("Warning: K8s client failed: %v", err)
 		log.Println("Running in limited mode - K8s endpoints will be unavailable")

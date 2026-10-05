@@ -26,9 +26,14 @@ func NewTopologyService(k8sClient *k8s.Client, promClient *prometheus.Client, te
 	}
 }
 
+// maxTraceEdges caps how many recent traces Tempo is asked for when
+// discovering cross-tier edges (databases, message queues, uninstrumented
+// callers). Edge discovery only needs representative traffic, not full history.
+const maxTraceEdges = 30
+
 func (s *TopologyService) GetTopology(ctx context.Context, namespace, window string) (*models.Topology, error) {
 	if window == "" {
-		window = "5m"
+		window = models.DefaultWindow
 	}
 
 	pods, err := s.k8sClient.GetPods(namespace)
@@ -245,7 +250,7 @@ func (s *TopologyService) buildEdges(
 	// 3. Layer 2: OpenTelemetry Distributed Trace Spans from Tempo
 	// Automatically discovers DBs (Redis RESP, Postgres, MySQL), message queues, and caller clients
 	if s.tempoClient != nil {
-		if traceEdges, err := s.tempoClient.GetTraceEdges(ctx, 30); err == nil {
+		if traceEdges, err := s.tempoClient.GetTraceEdges(ctx, maxTraceEdges); err == nil {
 			for _, te := range traceEdges {
 				src := resolveTarget(te.Source, ipToService)
 				target := resolveTarget(te.Target, ipToService)

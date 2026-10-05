@@ -14,7 +14,7 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({ status, size = 'md' })
   if (normalized === 'running' || normalized === 'ready' || normalized === 'ok' || normalized === 'status_code_ok') {
     style = 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30';
     dotStyle = 'bg-emerald-400';
-  } else if (normalized.includes('warn') || normalized === 'pending') {
+  } else if (normalized.includes('warn') || normalized === 'pending' || normalized === 'degraded') {
     style = 'bg-amber-500/10 text-amber-400 border-amber-500/30';
     dotStyle = 'bg-amber-400';
   } else if (normalized.includes('err') || normalized === 'failed' || normalized === 'crashloopbackoff') {

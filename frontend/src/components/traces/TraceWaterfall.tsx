@@ -57,24 +57,51 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Compute timeline boundaries
-  const { minStart, maxEnd, totalDurationNs, bottleneckSpan } = useMemo(() => {
-    if (!trace.spans || trace.spans.length === 0) {
-      return { minStart: 0, maxEnd: 1, totalDurationNs: 1, bottleneckSpan: null };
+  // Build parent-child tree hierarchy, chronological DFS ordering & Clock Skew Adjustment
+  const { hierarchicalSpans, minStart, maxEnd, totalDurationNs, bottleneckSpan } = useMemo(() => {
+    const spans = trace.spans ?? [];
+    if (spans.length === 0) {
+      return {
+        hierarchicalSpans: [],
+        minStart: 0,
+        maxEnd: 1,
+        totalDurationNs: 1,
+        bottleneckSpan: null,
+      };
     }
 
-    let min = trace.spans[0].startTime;
-    let max = trace.spans[0].startTime + (trace.spans[0].duration || 250_000);
+    const spanMap = new Map<string, Span>();
+    const childrenMap = new Map<string, Span[]>();
+
+    for (const span of spans) {
+      spanMap.set(span.spanId, span);
+      if (span.parentSpanId) {
+        const list = childrenMap.get(span.parentSpanId) || [];
+        list.push(span);
+        childrenMap.set(span.parentSpanId, list);
+      }
+    }
+
+    // Sort children chronologically by raw start time
+    for (const [, children] of childrenMap) {
+      children.sort((a, b) => a.startTime - b.startTime);
+    }
+
+    // Identify root spans: either parentSpanId is absent, or parent does not exist in this trace
+    const roots: Span[] = [];
+    for (const span of spans) {
+      if (!span.parentSpanId || !spanMap.has(span.parentSpanId)) {
+        roots.push(span);
+      }
+    }
+
+    roots.sort((a, b) => a.startTime - b.startTime);
+
+    // Identify bottleneck span (longest non-root child)
     let longestSpan: Span | undefined;
     let longestDur = -1;
-
-    for (const s of trace.spans) {
+    for (const s of spans) {
       const dur = s.duration > 0 ? s.duration : 250_000;
-      if (s.startTime < min) min = s.startTime;
-      const end = s.startTime + dur;
-      if (end > max) max = end;
-      // The root span covers the whole request by definition — it is never
-      // the bottleneck. Only child spans are candidates.
       if (!s.parentSpanId && s.duration > 0) continue;
       if (dur > longestDur) {
         longestDur = dur;
@@ -82,17 +109,87 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
       }
     }
 
-    const diff = Math.max(max - min, 1_000_000); // at least 1ms to prevent divide-by-zero
+    // Depth-first traversal with Jaeger-style Clock Skew Adjustment:
+    // A child span (e.g. server RPC) cannot start before its caller (client RPC)
+    // or finish after its caller. If clock skew or timestamp precision truncation
+    // (such as Node.js millisecond truncation vs Go nanoseconds) causes
+    // child.startTime < parent.startTime, clamp the child's timeline within parent window.
+    interface RenderSpanItem {
+      span: Span;
+      depth: number;
+      adjustedStartTime: number;
+      adjustedDuration: number;
+    }
+
+    const result: RenderSpanItem[] = [];
+    const visited = new Set<string>();
+
+    let min = spans[0].startTime;
+    let max = spans[0].startTime + (spans[0].duration || 250_000);
+
+    function dfs(
+      current: Span,
+      depth: number,
+      parentStart?: number,
+      parentEnd?: number
+    ) {
+      if (visited.has(current.spanId)) return;
+      visited.add(current.spanId);
+
+      let adjStart = current.startTime;
+      let adjDur = current.duration > 0 ? current.duration : 250_000;
+
+      // Clock Skew Adjustment against parent span boundaries
+      if (parentStart !== undefined && parentEnd !== undefined) {
+        if (adjStart < parentStart) {
+          adjStart = parentStart;
+        }
+        if (adjStart + adjDur > parentEnd) {
+          if (adjDur <= (parentEnd - parentStart)) {
+            adjStart = Math.max(parentStart, parentEnd - adjDur);
+          } else {
+            adjStart = parentStart;
+            adjDur = Math.max((parentEnd - parentStart) * 0.95, 50_000);
+          }
+        }
+      }
+
+      if (adjStart < min) min = adjStart;
+      const end = adjStart + adjDur;
+      if (end > max) max = end;
+
+      result.push({
+        span: current,
+        depth,
+        adjustedStartTime: adjStart,
+        adjustedDuration: adjDur,
+      });
+
+      const children = childrenMap.get(current.spanId) || [];
+      for (const child of children) {
+        dfs(child, depth + 1, adjStart, adjStart + adjDur);
+      }
+    }
+
+    for (const root of roots) {
+      dfs(root, 0);
+    }
+
+    for (const span of spans) {
+      if (!visited.has(span.spanId)) {
+        dfs(span, 0);
+      }
+    }
+
+    const diff = Math.max(max - min, 1_000_000);
     return {
+      hierarchicalSpans: result,
       minStart: min,
       maxEnd: max,
       totalDurationNs: diff,
-      // A single-span trace has nothing to compare against, so calling that
-      // span "the bottleneck" is noise rather than signal.
-      bottleneckSpan: trace.spans.length > 1 ? longestSpan ?? null : null,
+      bottleneckSpan: spans.length > 1 ? longestSpan ?? null : null,
     };
   }, [trace]);
-
 
   const totalDurationMs = (totalDurationNs / 1_000_000).toFixed(1);
 
@@ -195,11 +292,11 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
 
         {/* Spans List */}
         <div className="divide-y divide-slate-800/50">
-          {trace.spans && trace.spans.length > 0 ? (
-            trace.spans.map((span, idx) => {
-              const startOffset = Math.max(0, span.startTime - minStart);
+          {hierarchicalSpans.length > 0 ? (
+            hierarchicalSpans.map(({ span, depth, adjustedStartTime, adjustedDuration }, idx) => {
+              const startOffset = Math.max(0, adjustedStartTime - minStart);
               const leftPercent = Math.min(100, Math.max(0, (startOffset / totalDurationNs) * 100));
-              const spanDur = span.duration > 0 ? span.duration : 250_000;
+              const spanDur = adjustedDuration > 0 ? adjustedDuration : 250_000;
               const widthPercent = Math.min(
                 100 - leftPercent,
                 Math.max(2.5, (spanDur / totalDurationNs) * 100)
@@ -210,14 +307,22 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
 
               return (
                 <div
-                  key={idx}
+                  key={span.spanId || idx}
                   onClick={() => setSelectedSpan(span)}
-                  className={`grid grid-cols-12 gap-2 p-3 items-center hover:bg-slate-800/40 cursor-pointer transition text-xs font-mono group ${
+                  className={`grid grid-cols-12 gap-2 p-2.5 items-center hover:bg-slate-800/40 cursor-pointer transition text-xs font-mono group ${
                     isBottleneck ? 'bg-amber-500/5' : ''
                   }`}
                 >
-                  {/* Left Column: Service & Operation */}
-                  <div className="col-span-5 flex items-center gap-2 overflow-hidden pr-2">
+                  {/* Left Column: Service & Operation with tree indentation */}
+                  <div
+                    className="col-span-5 flex items-center gap-1.5 overflow-hidden pr-2"
+                    style={{ paddingLeft: `${Math.min(depth * 14, 120)}px` }}
+                  >
+                    {depth > 0 && (
+                      <span className="text-slate-600 font-mono text-[10px] select-none shrink-0 opacity-70">
+                        └─
+                      </span>
+                    )}
                     <span
                       className={`text-[10px] px-2 py-0.5 rounded border font-semibold shrink-0 ${sColor.bg} ${sColor.border} ${sColor.text}`}
                     >

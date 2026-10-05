@@ -58,6 +58,8 @@ resume_stack() {
     --namespace "$NS" \
     -f deploy/helm/fluent-bit-values.yaml
   echo "--- Waiting for rollouts ---"
+  kubectl -n "$NS" rollout status sts/loki --timeout=180s
+  kubectl -n "$NS" rollout status sts/prometheus-prometheus-kube-prometheus-prometheus --timeout=180s
   kubectl -n "$NS" rollout status deploy/tempo --timeout=180s
   kubectl -n "$NS" rollout status ds/fluent-bit --timeout=180s
   kubectl -n "$NS" rollout status ds/beyla --timeout=180s

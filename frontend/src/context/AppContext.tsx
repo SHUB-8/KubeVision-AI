@@ -38,7 +38,9 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [activeTab, setActiveTab] = useState<TabType>('topology');
-  const [activeNamespace, setActiveNamespace] = useState<string>('boutique');
+  // Empty until the saved config arrives; API calls with an empty namespace
+  // fall back to the backend's OBSERVED_NAMESPACE default.
+  const [activeNamespace, setActiveNamespace] = useState<string>('');
   const [timeWindow, setTimeWindow] = useState<string>('5m');
   const [refreshInterval, setRefreshInterval] = useState<number>(15);
   const [refreshCount, setRefreshCount] = useState<number>(0);
@@ -75,11 +77,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   }, []);
 
+  // Runs once on mount. The saved namespace/timeWindow/refreshInterval are
+  // applied here only - re-applying on later runs would snap the user's
+  // in-session selections back to the stored config.
   const fetchConfig = useCallback(async () => {
     try {
       const cfg = await api.getConfig();
       setConfig(cfg);
-      if (cfg.namespace && !activeNamespace) {
+      if (cfg.namespace) {
         setActiveNamespace(cfg.namespace);
       }
       if (cfg.timeWindow) {
@@ -91,7 +96,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     } catch (err: any) {
       console.warn('Failed to fetch config:', err.message);
     }
-  }, [activeNamespace]);
+  }, []);
 
   // Initial load
   useEffect(() => {

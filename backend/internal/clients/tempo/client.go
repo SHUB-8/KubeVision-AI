@@ -178,10 +178,20 @@ func (c *Client) SearchTraces(ctx context.Context, serviceName string, limit int
 			if len(cleanSpans) == 0 {
 				continue
 			}
+			rootTraceName := t.RootTraceName
+			for _, s := range cleanSpans {
+				if s.ParentSpanID == "" {
+					rootTraceName = s.OperationName
+					break
+				}
+			}
+			if (rootTraceName == "GET" || rootTraceName == "POST" || rootTraceName == "") && len(cleanSpans) > 0 {
+				rootTraceName = cleanSpans[0].OperationName
+			}
 			traces = append(traces, models.Trace{
 				TraceID:         t.TraceID,
 				RootServiceName: t.RootServiceName,
-				RootTraceName:   t.RootTraceName,
+				RootTraceName:   rootTraceName,
 				DurationMs:      t.DurationMs,
 				SpanCount:       len(cleanSpans),
 				Spans:           cleanSpans,
@@ -267,11 +277,22 @@ func (c *Client) GetTrace(ctx context.Context, traceID string) ([]models.Span, e
 					attrs[a.Key] = a.Value.StringValue
 				}
 
+				opName := raw.Name
+				if opName == "GET" || opName == "POST" || opName == "PUT" || opName == "DELETE" || opName == "PATCH" || opName == "HEAD" {
+					if path, ok := attrs["url.path"]; ok && path != "" {
+						opName = fmt.Sprintf("%s %s", raw.Name, path)
+					} else if target, ok := attrs["http.target"]; ok && target != "" {
+						opName = fmt.Sprintf("%s %s", raw.Name, target)
+					} else if route, ok := attrs["http.route"]; ok && route != "" {
+						opName = fmt.Sprintf("%s %s", raw.Name, route)
+					}
+				}
+
 				span := models.Span{
 					TraceID:       raw.TraceID,
 					SpanID:        raw.SpanID,
 					ParentSpanID:  raw.ParentSpanID,
-					OperationName: raw.Name,
+					OperationName: opName,
 					ServiceName:   serviceName,
 					StartTime:     startNano,
 					Duration:      durNano,

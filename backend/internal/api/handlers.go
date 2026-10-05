@@ -33,9 +33,6 @@ type Handlers struct {
 
 func NewHandlers(store *storage.Store, k8sClient *k8s.Client, promClient *prometheus.Client,
 	lokiClient *loki.Client, tempoClient *tempo.Client, defaultNamespace string) *Handlers {
-	if defaultNamespace == "" {
-		defaultNamespace = "boutique"
-	}
 	return &Handlers{
 		store:            store,
 		defaultNamespace: defaultNamespace,
@@ -88,7 +85,7 @@ func (h *Handlers) GetHealth(c *gin.Context) {
 
 func (h *Handlers) GetTopology(c *gin.Context) {
 	namespace := c.DefaultQuery("namespace", h.defaultNamespace)
-	window := c.DefaultQuery("window", "5m")
+	window := c.DefaultQuery("window", models.DefaultWindow)
 
 	if h.k8sClient == nil {
 		c.JSON(http.StatusOK, models.Topology{Nodes: []models.Node{}, Edges: []models.Edge{}})
@@ -118,16 +115,28 @@ func (h *Handlers) GetServices(c *gin.Context) {
 	}
 
 	serviceMap := make(map[string]*models.Service)
+	// Per-service pod phase counts: [running, pending, failed]. Other phases
+	// (Succeeded, Unknown) count toward none of them.
+	phaseCounts := make(map[string][3]int)
 	for _, pod := range pods {
 		svcName := pod.WorkloadName
 		if svcName == "" {
 			svcName = extractServiceName(pod.Name)
 		}
+		counts := phaseCounts[svcName]
+		switch pod.Status {
+		case "Running":
+			counts[0]++
+		case "Pending":
+			counts[1]++
+		case "Failed":
+			counts[2]++
+		}
+		phaseCounts[svcName] = counts
 		if _, exists := serviceMap[svcName]; !exists {
 			serviceMap[svcName] = &models.Service{
 				Name:      svcName,
 				Namespace: namespace,
-				Status:    "Running",
 				Labels:    make(map[string]string),
 			}
 		}
@@ -137,12 +146,15 @@ func (h *Handlers) GetServices(c *gin.Context) {
 			svc.Ready++
 		}
 	}
+	for name, counts := range phaseCounts {
+		serviceMap[name].Status = deriveServiceStatus(counts[0], counts[1], counts[2])
+	}
 
 	// Enrich the K8s inventory with RED metrics from Beyla (via Prometheus).
 	// A missing series (service with no traffic in the window) just leaves
 	// the zero value; a Prometheus error degrades the enrichment only.
 	if h.promClient != nil {
-		window := c.DefaultQuery("window", "5m")
+		window := c.DefaultQuery("window", models.DefaultWindow)
 		if data, err := h.promClient.GetServiceRates(namespace, window); err == nil {
 			for _, r := range parseMetricEntries(data) {
 				if svc, ok := serviceMap[r.Metric["service_name"]]; ok {
@@ -195,7 +207,7 @@ func (h *Handlers) GetServices(c *gin.Context) {
 	// Enrich services that have 0 inbound server metrics with their observed operational rates
 	// (e.g. client workloads generating outbound requests or databases handling queries)
 	if h.topologySvc != nil {
-		window := c.DefaultQuery("window", "5m")
+		window := c.DefaultQuery("window", models.DefaultWindow)
 		if topo, err := h.topologySvc.GetTopology(c.Request.Context(), namespace, window); err == nil {
 			for _, edge := range topo.Edges {
 				if edge.Rate > 0 {
@@ -247,7 +259,7 @@ func entryValue(r metricEntry) float64 {
 func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 	name := c.Param("name")
 	namespace := c.DefaultQuery("namespace", h.defaultNamespace)
-	window := c.DefaultQuery("window", "5m")
+	window := c.DefaultQuery("window", models.DefaultWindow)
 
 	endpointMap := make(map[string]*models.Endpoint)
 	getEndpoint := func(r metricEntry) *models.Endpoint {
@@ -512,7 +524,7 @@ func (h *Handlers) GetBaselines(c *gin.Context) {
 
 func (h *Handlers) RecalculateBaselines(c *gin.Context) {
 	namespace := c.DefaultQuery("namespace", h.defaultNamespace)
-	window := c.DefaultQuery("window", "5m")
+	window := c.DefaultQuery("window", models.DefaultWindow)
 	if err := h.baseliner.CalculateBaselines(c.Request.Context(), namespace, window); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -524,7 +536,7 @@ func defaultSettings(namespace string) models.UISettings {
 	return models.UISettings{
 		Theme:           "dark",
 		RefreshInterval: 15,
-		TimeWindow:      "5m",
+		TimeWindow:      models.DefaultWindow,
 		Namespace:       namespace,
 		Thresholds: models.ThresholdSettings{
 			ErrorRateWarning: 0.01, ErrorRateCritical: 0.05,
@@ -535,6 +547,25 @@ func defaultSettings(namespace string) models.UISettings {
 		Display: models.DisplaySettings{
 			ShowAnnotations: true, ShowProtocolStats: true, ShowK8sMetadata: true,
 		},
+	}
+}
+
+// deriveServiceStatus collapses per-pod phases into one service status.
+// Precedence: any failure wins, then waiting pods, then partial availability.
+// Succeeded and Unknown phases count as neither up nor down, so a service whose
+// pods are all in those states reports Unknown rather than a healthy state.
+func deriveServiceStatus(running, pending, failed int) string {
+	switch {
+	case failed > 0:
+		return "Failed"
+	case pending > 0 && running == 0:
+		return "Pending"
+	case pending > 0:
+		return "Degraded"
+	case running > 0:
+		return "Running"
+	default:
+		return "Unknown"
 	}
 }
 

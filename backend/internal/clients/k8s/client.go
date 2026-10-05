@@ -18,10 +18,11 @@ import (
 // in-cluster (ServiceAccount token) and locally (default kubeconfig rules:
 // KUBECONFIG env var, ~/.kube/config).
 type Client struct {
-	clientset *kubernetes.Clientset
+	clientset   *kubernetes.Clientset
+	clusterName string
 }
 
-func NewClient() (*Client, error) {
+func NewClient(clusterName string) (*Client, error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		// Not running inside the cluster - fall back to kubeconfig (local dev)
@@ -39,7 +40,7 @@ func NewClient() (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
 	}
-	return &Client{clientset: clientset}, nil
+	return &Client{clientset: clientset, clusterName: clusterName}, nil
 }
 
 func (c *Client) ctx() (context.Context, context.CancelFunc) {
@@ -104,7 +105,7 @@ func (c *Client) GetClusterInfo() (*models.ClusterInfo, error) {
 	}
 
 	return &models.ClusterInfo{
-		Name:    "k3s",
+		Name:    c.clusterName,
 		Version: version.GitVersion,
 		Node:    nodeName,
 		Status:  nodeStatus,

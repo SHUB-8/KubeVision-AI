@@ -20,7 +20,10 @@ UI in one process.
 
 | Command | What |
 |---|---|
-| `./scripts/dev-up.sh` | Bring the dev environment back (idempotent) |
+| `./scripts/all.sh` | Start everything: k3s, all pods, forwards, backend & UI |
+| `./scripts/all.sh stop` | Reverse: gracefully stop backend, UI, forwards & k3s |
+| `./scripts/all.sh status` | End-to-end status of cluster, pods, forwards, and apps |
+| `./scripts/dev-up.sh` | Bring host dev processes back (idempotent) |
 | `./scripts/dev-up.sh --dev` | Vite hot-reload instead of built UI (`:5173`) |
 | `./scripts/dev-up.sh reload` | Rebuild & restart backend + frontend (reloads code changes) |
 | `./scripts/dev-up.sh reload --all` | Reload backend/frontend AND re-apply in-cluster configs to update pods |

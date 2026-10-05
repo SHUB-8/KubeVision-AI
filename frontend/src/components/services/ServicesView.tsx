@@ -261,10 +261,7 @@ export const ServicesView: React.FC = () => {
                         <span className="text-sm font-bold text-slate-100 tracking-tight">
                           {svc.name}
                         </span>
-                        <StatusBadge
-                          status={svc.ready === svc.replicas ? 'Running' : 'Degraded'}
-                          size="sm"
-                        />
+                        <StatusBadge status={svc.status} size="sm" />
                       </div>
                       <div className="flex items-center gap-2 mt-1 text-xs font-mono text-slate-400">
                         <span>ns: {svc.namespace}</span>

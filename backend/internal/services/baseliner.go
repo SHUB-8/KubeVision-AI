@@ -22,7 +22,7 @@ func NewBaseliner(store *storage.Store, promClient *prometheus.Client) *Baseline
 
 func (b *Baseliner) CalculateBaselines(ctx context.Context, namespace, window string) error {
 	if window == "" {
-		window = "5m"
+		window = models.DefaultWindow
 	}
 
 	rateData, err := b.promClient.GetServiceRates(namespace, window)
@@ -79,9 +79,11 @@ func (b *Baseliner) CalculateBaselines(ctx context.Context, namespace, window st
 					Metric:    fmt.Sprintf("latency_%s", q.name),
 					Value:     r.FloatValue(),
 					Window:    window,
-					UpdatedAt: time.Now().UTC().Format(time.RFC3339),
-				}
-				b.store.Set(key, baseline)
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+			}
+			if err := b.store.Set(key, baseline); err != nil {
+				return fmt.Errorf("failed to store baseline: %w", err)
+			}
 			}
 		}
 	}

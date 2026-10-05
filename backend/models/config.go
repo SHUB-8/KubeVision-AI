@@ -1,5 +1,14 @@
 package models
 
+// Defaults shared across packages so each value has exactly one definition.
+// OBSERVED_NAMESPACE and CLUSTER_NAME override the namespace / cluster defaults
+// via the environment (see cmd/server/main.go).
+const (
+	DefaultNamespace = "boutique"
+	DefaultCluster   = "k3s"
+	DefaultWindow    = "5m"
+)
+
 type UISettings struct {
 	Theme           string            `json:"theme"`
 	RefreshInterval int               `json:"refreshInterval"`
