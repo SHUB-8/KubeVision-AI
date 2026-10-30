@@ -33,7 +33,7 @@ func (b *Baseliner) CalculateBaselines(ctx context.Context, namespace, window st
 	var rateResults []prometheus.VectorResult
 	if err := json.Unmarshal(rateData, &rateResults); err == nil {
 		for _, r := range rateResults {
-			svc := r.Metric["service_name"]
+			svc := prometheus.MetricServiceName(r.Metric)
 			if svc == "" {
 				continue
 			}
@@ -46,7 +46,7 @@ func (b *Baseliner) CalculateBaselines(ctx context.Context, namespace, window st
 				Window:    window,
 				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 			}
-			if err := b.store.Set(key, baseline); err != nil {
+			if err := b.store.SetWithTTL(key, baseline, storage.DefaultRetentionTTL); err != nil {
 				return fmt.Errorf("failed to store baseline: %w", err)
 			}
 		}
@@ -68,7 +68,7 @@ func (b *Baseliner) CalculateBaselines(ctx context.Context, namespace, window st
 		var latencyResults []prometheus.VectorResult
 		if err := json.Unmarshal(latencyData, &latencyResults); err == nil {
 			for _, r := range latencyResults {
-				svc := r.Metric["service_name"]
+				svc := prometheus.MetricServiceName(r.Metric)
 				if svc == "" {
 					continue
 				}
@@ -79,11 +79,11 @@ func (b *Baseliner) CalculateBaselines(ctx context.Context, namespace, window st
 					Metric:    fmt.Sprintf("latency_%s", q.name),
 					Value:     r.FloatValue(),
 					Window:    window,
-				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
-			}
-			if err := b.store.Set(key, baseline); err != nil {
-				return fmt.Errorf("failed to store baseline: %w", err)
-			}
+					UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+				}
+				if err := b.store.SetWithTTL(key, baseline, storage.DefaultRetentionTTL); err != nil {
+					return fmt.Errorf("failed to store baseline: %w", err)
+				}
 			}
 		}
 	}
