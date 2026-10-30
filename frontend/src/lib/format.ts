@@ -37,3 +37,21 @@ export function formatPercent(ratio: number | null | undefined, digits = 1): str
   if (ratio === null || ratio === undefined || Number.isNaN(ratio)) return '—';
   return `${(ratio * 100).toFixed(digits)}%`;
 }
+
+/**
+ * Formats a timestamp (e.g. a pod creation time) as a relative age.
+ * "11:34:24 PM" answers the wrong question; an age column must read "6h 12m".
+ */
+export function formatAge(timestamp: string | number | null | undefined): string {
+  if (timestamp === null || timestamp === undefined || timestamp === '') return '—';
+  const created = new Date(timestamp).getTime();
+  if (Number.isNaN(created)) return '—';
+  const seconds = Math.max(0, Math.floor((Date.now() - created) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}

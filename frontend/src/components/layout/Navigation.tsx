@@ -6,6 +6,7 @@ import {
   Server,
   GitBranch,
   Terminal,
+  Activity,
   Boxes,
   Zap,
   SlidersHorizontal,
@@ -23,9 +24,10 @@ export const TABS: TabItem[] = [
   { id: 'services', label: 'Services', description: 'RED metrics per service, with endpoint drill-down', icon: Server },
   { id: 'traces', label: 'Traces', description: 'Distributed trace search and span waterfall', icon: GitBranch },
   { id: 'logs', label: 'Logs', description: 'Pod log stream from Loki', icon: Terminal },
+  { id: 'events', label: 'K8s Events', description: 'Persisted Kubernetes Warning Events', icon: Activity },
   { id: 'cluster', label: 'Cluster', description: 'Nodes, pods and cluster health', icon: Boxes },
   { id: 'incidents', label: 'Incidents', description: 'Anomaly pipeline and root-cause analysis', icon: Zap },
-  { id: 'settings', label: 'Settings', description: 'Thresholds, ML parameters and display options', icon: SlidersHorizontal },
+  { id: 'settings', label: 'Settings', description: 'Alert thresholds and display options', icon: SlidersHorizontal },
 ];
 
 /**
@@ -33,7 +35,7 @@ export const TABS: TabItem[] = [
  * TABS list — see MobileNav in App.tsx.
  */
 export const Navigation: React.FC = () => {
-  const { activeTab, setActiveTab } = useApp();
+  const { activeTab, setActiveTab, setSelectedService } = useApp();
 
   return (
     <nav
@@ -55,7 +57,10 @@ export const Navigation: React.FC = () => {
           return (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
+              onClick={() => {
+                setSelectedService(null);
+                setActiveTab(tab.id);
+              }}
               aria-current={isActive ? 'page' : undefined}
               className={`relative w-full flex items-center gap-2.5 pl-4 pr-3 py-1.5 text-[13px] transition-colors ${
                 isActive
@@ -81,7 +86,7 @@ export const Navigation: React.FC = () => {
 
 /** Horizontal nav for <md screens, rendered under the status bar. */
 export const MobileNav: React.FC = () => {
-  const { activeTab, setActiveTab } = useApp();
+  const { activeTab, setActiveTab, setSelectedService } = useApp();
   return (
     <nav
       aria-label="Primary"
@@ -93,7 +98,10 @@ export const MobileNav: React.FC = () => {
         return (
           <button
             key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
+            onClick={() => {
+              setSelectedService(null);
+              setActiveTab(tab.id);
+            }}
             aria-current={isActive ? 'page' : undefined}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs whitespace-nowrap ${
               isActive

@@ -15,7 +15,7 @@ export interface HealthResponse {
  *   estimated - borrowed from a peer's measured rate, not observed on this edge
  * Absent (undefined) means "no data" and must render as such, never as 0.
  */
-export type MetricSource = 'metrics' | 'traces' | 'estimated';
+export type MetricSource = 'metrics' | 'client-observed' | 'traces' | 'estimated';
 
 export interface Node {
   id: string;
@@ -60,6 +60,8 @@ export interface Service {
   rate: number;
   errorRate: number;
   latencyP95: number;
+  rateSource?: MetricSource;
+  latencySource?: MetricSource;
 }
 
 export interface Endpoint {
@@ -72,6 +74,7 @@ export interface Endpoint {
   rate: number;
   errorRate: number;
   rateSource?: MetricSource;
+  errorRateSource?: MetricSource;
   latencySource?: MetricSource;
 }
 
@@ -79,6 +82,14 @@ export interface Span {
   traceId: string;
   spanId: string;
   parentSpanId?: string;
+  /**
+   * True when the original parent span was never exported (Beyla's per-
+   * connection context limitation on multiplexed HTTP/2/gRPC) and the backend
+   * re-attached this span to its caller's hosting span by time-window
+   * adjacency. The link is an inference and must render differently from an
+   * observed parent link.
+   */
+  parentInferred?: boolean;
   operationName: string;
   serviceName: string;
   startTime: number;
@@ -91,6 +102,7 @@ export interface Trace {
   traceId: string;
   rootServiceName?: string;
   rootTraceName?: string;
+  rootInferred?: boolean;
   durationMs?: number;
   spanCount?: number;
   spans: Span[];
@@ -101,6 +113,22 @@ export interface LogEntry {
   stream: string;
   labels?: Record<string, string>;
   line: string;
+}
+
+export interface KubernetesEvent {
+  uid: string;
+  namespace: string;
+  name: string;
+  type: string;
+  reason: string;
+  message: string;
+  count: number;
+  firstObservedAt: string;
+  lastObservedAt: string;
+  involvedObjectKind: string;
+  involvedObjectName: string;
+  involvedObjectUid: string;
+  reportingComponent?: string;
 }
 
 export interface PodInfo {

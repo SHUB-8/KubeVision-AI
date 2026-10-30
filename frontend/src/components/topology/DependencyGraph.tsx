@@ -1,11 +1,9 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import dagre from '@dagrejs/dagre';
-import { LayoutGrid } from 'lucide-react';
 import {
   ReactFlow,
   MiniMap,
   Controls,
-  ControlButton,
   Panel,
   Background,
   useNodesState,
@@ -166,8 +164,16 @@ export const DependencyGraph: React.FC = () => {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [filterQuery, setFilterQuery] = useState<string>('');
   const [layoutDirection, setLayoutDirection] = useState<'LR' | 'TB'>('LR');
+  // Edge traffic animation: edges with a measured request rate animate by
+  // default (the pre-existing behavior); the toggle switches motion off.
+  const [showTrafficAnim, setShowTrafficAnim] = useState<boolean>(true);
   const containerRef = useRef<HTMLDivElement>(null);
   const flowInstanceRef = useRef<any>(null);
+  // Layout stability across refreshes: the structure key decides when the
+  // graph may re-layout, and the ref carries the live LR/TB choice into the
+  // fetch callback without making it a dependency.
+  const structureKeyRef = useRef<string | null>(null);
+  const layoutDirectionRef = useRef<'LR' | 'TB'>('LR');
 
   const getContainerSize = useCallback(() => {
     if (containerRef.current) {
@@ -196,14 +202,30 @@ export const DependencyGraph: React.FC = () => {
       const rawNodes = topoData.nodes || [];
       const rawEdges = topoData.edges || [];
 
+      // A refresh must not reshuffle the graph: layout (and the auto
+      // LR/TB choice) recompute only when the node/edge STRUCTURE changes.
+      // Pure metric updates keep every node exactly where it was — including
+      // anywhere the user dragged it.
+      const structureKey = JSON.stringify([
+        ...rawNodes.map((n) => n.id).sort(),
+        ...rawEdges.map((e) => `${e.source}->${e.target}`).sort(),
+      ]);
+      const structureChanged = structureKey !== structureKeyRef.current;
+
       // Layout: responsive adaptive dagre layout based on container dimensions
-      const { width, height } = getContainerSize();
-      const { positions, direction } = computeLayoutMap(
-        rawNodes.map((n) => n.id),
-        rawEdges.map((e) => ({ source: e.source, target: e.target })),
-        { containerWidth: width, containerHeight: height, zoom: 1, direction: 'auto' }
-      );
-      setLayoutDirection(direction);
+      let positions = new Map<string, { x: number; y: number }>();
+      if (structureChanged) {
+        structureKeyRef.current = structureKey;
+        const { width, height } = getContainerSize();
+        const layout = computeLayoutMap(
+          rawNodes.map((n) => n.id),
+          rawEdges.map((e) => ({ source: e.source, target: e.target })),
+          { containerWidth: width, containerHeight: height, zoom: 1, direction: 'auto' }
+        );
+        positions = layout.positions;
+        layoutDirectionRef.current = layout.direction;
+        setLayoutDirection(layout.direction);
+      }
 
       // Isolated services (no peer telemetry) are moved out of the flow
       // columns by computeLayoutMap — a disconnected node mid-column reads
@@ -249,8 +271,8 @@ export const DependencyGraph: React.FC = () => {
             rateSource,
             latencySource,
             status: svc?.status || 'Running',
-            replicas: svc?.replicas || 1,
-            ready: svc?.ready || 1,
+            replicas: svc?.replicas,
+            ready: svc?.ready,
           },
         };
       });
@@ -279,14 +301,19 @@ export const DependencyGraph: React.FC = () => {
           id: edge.id,
           source: edge.source,
           target: edge.target,
-          sourceHandle: direction === 'LR' ? 'source-right' : 'source-bottom',
-          targetHandle: direction === 'LR' ? 'target-left' : 'target-top',
-          animated: !edge.inferred,
+          sourceHandle: layoutDirectionRef.current === 'LR' ? 'source-right' : 'source-bottom',
+          targetHandle: layoutDirectionRef.current === 'LR' ? 'target-left' : 'target-top',
+          // Solid line; dashed is reserved for static-map links. Edges with a
+          // measured request rate animate by default (traffic-as-data); the
+          // Traffic toggle switches the motion off.
+          animated: showTrafficAnim && !edge.inferred && (edge.rate || 0) > 0,
           style: {
             stroke: strokeColor,
             strokeWidth: hasErrors ? 2.5 : 1.8,
-            strokeDasharray: edge.inferred ? '2 4' : hasErrors ? '4 2' : undefined,
+            strokeDasharray: edge.inferred ? '2 4' : undefined,
           },
+          // Protocol/rate labels render on every edge (user preference) —
+          // they hide only while focus-mode dims non-adjacent edges.
           label: edgeLabel,
           labelStyle: {
             fill: edge.inferred ? '#8b98ad' : hasErrors ? '#f8a199' : '#38bdf8',
@@ -308,12 +335,31 @@ export const DependencyGraph: React.FC = () => {
             height: 14,
             color: strokeColor,
           },
-        };
+          // Kept off React Flow's schema — display-layer metadata for the
+          // hover/selection label logic in displayedEdges.
+          _label: edgeLabel,
+          _hasErrors: hasErrors,
+          _inferred: !!edge.inferred,
+        } as any;
       });
 
 
-      setNodes(flowNodes);
+      // Merge instead of replace: fresh metrics land on the SAME node objects
+      // (positions preserved — including user drags — when structure unchanged).
+      setNodes((prev: any[]) => {
+        const prevById = new Map(prev.map((n) => [n.id, n]));
+        return flowNodes.map((fn) => {
+          const prevNode = prevById.get(fn.id);
+          const position = positions.get(fn.id) ?? prevNode?.position ?? fn.position;
+          return prevNode ? { ...fn, position } : fn;
+        });
+      });
       setEdges(flowEdges);
+      if (structureChanged) {
+        setTimeout(() => {
+          flowInstanceRef.current?.fitView({ padding: 0.15, maxZoom: 1, duration: 350 });
+        }, 50);
+      }
     } catch (err: any) {
       console.error('Error fetching topology:', err);
       setError(err.message);
@@ -328,55 +374,6 @@ export const DependencyGraph: React.FC = () => {
 
   const onNodeClick = (_: React.MouseEvent, node: FlowNode) => {
     setSelectedNodeId(node.id);
-  };
-
-  // Rearrange: adaptively re-compute layout according to window dimensions,
-  // aspect ratio, and zoom level. Toggles between horizontal and vertical flow
-  // and smoothly centers the graph.
-  const handleRearrange = () => {
-    const { width, height } = getContainerSize();
-    const currentZoom = flowInstanceRef.current?.getZoom() || 1;
-
-    // Toggle orientation or re-adapt dynamically
-    const nextDir: 'LR' | 'TB' = layoutDirection === 'LR' ? 'TB' : 'LR';
-
-    const { positions, direction } = computeLayoutMap(
-      nodes.map((n: any) => n.id),
-      edges.map((e: any) => ({ source: e.source, target: e.target })),
-      {
-        containerWidth: width,
-        containerHeight: height,
-        zoom: currentZoom,
-        direction: nextDir,
-      }
-    );
-    setLayoutDirection(direction);
-
-    // Update node positions
-    setNodes((prev: any[]) =>
-      prev.map((n) => ({
-        ...n,
-        position: positions.get(n.id) ?? n.position,
-      }))
-    );
-
-    // Update edge source/target handles to match the new layout direction
-    setEdges((prev: any[]) =>
-      prev.map((e) => ({
-        ...e,
-        sourceHandle: direction === 'LR' ? 'source-right' : 'source-bottom',
-        targetHandle: direction === 'LR' ? 'target-left' : 'target-top',
-      }))
-    );
-
-    // Smoothly animate fitView to the newly rearranged layout
-    setTimeout(() => {
-      flowInstanceRef.current?.fitView({
-        padding: 0.15,
-        maxZoom: 1,
-        duration: 350,
-      });
-    }, 50);
   };
 
   const filteredNodes = useMemo(() => {
@@ -411,12 +408,22 @@ export const DependencyGraph: React.FC = () => {
   }, [filteredNodes, neighborIds]);
 
   const displayedEdges = useMemo(() => {
-    if (!activeId) return edges;
+    const stripLabel = (e: any) => ({
+      ...e,
+      label: undefined,
+      labelStyle: undefined,
+      labelBgStyle: undefined,
+    });
+    if (!activeId) {
+      // Idle: every edge shows its protocol/rate label (user preference).
+      return edges;
+    }
     return edges.map((e: any) => {
       const keep = e.source === activeId || e.target === activeId;
-      return keep
-        ? e
-        : { ...e, label: undefined, labelStyle: undefined, labelBgStyle: undefined, style: { ...(e.style || {}), opacity: 0.06 } };
+      if (!keep) {
+        return { ...stripLabel(e), style: { ...(e.style || {}), opacity: 0.06 } };
+      }
+      return { ...e, label: e._label ?? e.label };
     });
   }, [edges, activeId]);
 
@@ -428,7 +435,7 @@ export const DependencyGraph: React.FC = () => {
   if (loading && nodes.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center min-h-[600px]">
-        <LoadingSpinner message="Reconstructing eBPF service mesh topology..." size="lg" />
+        <LoadingSpinner message="Loading topology…" size="lg" />
       </div>
     );
   }
@@ -462,26 +469,34 @@ export const DependencyGraph: React.FC = () => {
           />
         </div>
 
-        {/* Legend */}
+        {/* Legend — every visual encoding explained (Kiali practice) */}
         <div className="hidden md:flex items-center gap-3 px-3 py-1.5 rounded-md bg-slate-900/80 border border-slate-700/70 text-[11px] font-mono">
           <div className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
-            <span className="text-slate-300">Healthy Flow</span>
+            <span className="w-4 h-0 border-t-2 border-cyan-400" />
+            <span className="text-slate-300">Live traffic</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-rose-500" />
+            <span className="w-4 h-0 border-t-2 border-rose-500" />
             <span className="text-slate-300">Errors (&gt;1%)</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="w-4 h-0 border-t-2 border-dashed border-slate-500" />
+            <span className="text-slate-300">Static map</span>
           </div>
         </div>
 
-        {/* Layout Rearrange & Toggle Button */}
+        {/* Traffic animation: edges with measured rate animate; toggle switches motion off */}
         <button
-          onClick={handleRearrange}
-          className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-slate-900/90 hover:bg-slate-800 border border-slate-700/80 text-[11px] font-mono text-slate-300 hover:text-cyan-400 transition"
-          title={`Rearrange layout (Current: ${layoutDirection === 'LR' ? 'Horizontal' : 'Vertical'} — Click to adapt & toggle)`}
+          onClick={() => setShowTrafficAnim((v) => !v)}
+          className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border text-[11px] font-mono transition ${
+            showTrafficAnim
+              ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-300'
+              : 'bg-slate-900/90 hover:bg-slate-800 border-slate-700/80 text-slate-300 hover:text-cyan-400'
+          }`}
+          title="Animate edges that carry a measured request rate"
         >
-          <LayoutGrid className="w-3.5 h-3.5 text-cyan-400" />
-          <span>{layoutDirection === 'LR' ? 'Horizontal Flow' : 'Vertical Flow'}</span>
+          <Zap className="w-3.5 h-3.5" />
+          <span>{showTrafficAnim ? 'Traffic: On' : 'Traffic: Off'}</span>
         </button>
       </div>
 
@@ -519,19 +534,12 @@ export const DependencyGraph: React.FC = () => {
                 isolated · no eBPF peer telemetry
               </Panel>
             )}
-            <Controls className="!bg-slate-900/90 !border !border-slate-700 !rounded-md ! overflow-hidden">
-              <ControlButton
-                onClick={handleRearrange}
-                title={`Rearrange layout (${layoutDirection === 'LR' ? 'Horizontal → Click for Vertical' : 'Vertical → Click for Horizontal'})`}
-              >
-                <LayoutGrid className="w-3.5 h-3.5" />
-              </ControlButton>
-            </Controls>
+            <Controls className="!bg-slate-900/90 !border !border-slate-700 !rounded-md overflow-hidden" />
             <MiniMap
               nodeStrokeWidth={3}
               zoomable
               pannable
-              className="!bg-slate-900/90 !border !border-slate-800 !rounded-md overflow-hidden !"
+              className="!bg-slate-900/90 !border !border-slate-800 !rounded-md overflow-hidden"
               nodeColor={(node: any) => {
                 if ((node.data?.errorRate || 0) > 0.01) return '#f43f5e';
                 return '#06b6d4';
@@ -543,12 +551,21 @@ export const DependencyGraph: React.FC = () => {
       </div>
 
       {/* Side Detail Panel */}
-      {selectedNodeId && (
-        <NodeDetailPanel
-          serviceName={selectedNodeId}
-          onClose={() => setSelectedNodeId(null)}
-        />
-      )}
+      {(() => {
+        const selected = nodes.find((node) => node.id === selectedNodeId);
+        if (!selected || selected.data?.type !== 'service') return null;
+        return (
+          <NodeDetailPanel
+            serviceName={selected.id}
+            onClose={() => setSelectedNodeId(null)}
+            stats={{
+              errorRate: selected.data?.errorRate,
+              latencyP95: selected.data?.latencyP95,
+              rate: selected.data?.rate,
+            }}
+          />
+        );
+      })()}
     </div>
   );
 };

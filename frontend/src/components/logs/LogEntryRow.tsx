@@ -5,9 +5,11 @@ import { Copy, Check, Terminal, AlertCircle } from 'lucide-react';
 interface LogEntryRowProps {
   entry: LogEntry;
   rawMode?: boolean;
+  /** When provided, the pod badge becomes a button that isolates this pod's stream. */
+  onPodClick?: (pod: string) => void;
 }
 
-export const LogEntryRow: React.FC<LogEntryRowProps> = ({ entry, rawMode }) => {
+export const LogEntryRow: React.FC<LogEntryRowProps> = ({ entry, rawMode, onPodClick }) => {
   const [copied, setCopied] = useState(false);
 
   const copyLine = () => {
@@ -32,16 +34,22 @@ export const LogEntryRow: React.FC<LogEntryRowProps> = ({ entry, rawMode }) => {
     levelBadgeColor = 'text-slate-400 bg-slate-800 border-slate-700';
   }
 
-  // Parse JSON if possible
+  // Parse JSON if possible. Only a non-empty message field counts — an empty
+  // `log` value must fall through to `message` (and then the raw line) rather
+  // than dump the whole JSON payload into the row.
   let displayMessage = entry.line;
   let parsedJson: any = null;
   if (!rawMode) {
     try {
       parsedJson = JSON.parse(entry.line);
-      if (parsedJson.log) {
-        displayMessage = parsedJson.log.trim();
-      } else if (parsedJson.message) {
-        displayMessage = parsedJson.message;
+      const candidate =
+        typeof parsedJson.log === 'string' && parsedJson.log.trim() !== ''
+          ? parsedJson.log
+          : typeof parsedJson.message === 'string' && parsedJson.message.trim() !== ''
+            ? parsedJson.message
+            : null;
+      if (candidate !== null) {
+        displayMessage = candidate.trim();
       }
     } catch {
       // not json
@@ -76,10 +84,20 @@ export const LogEntryRow: React.FC<LogEntryRowProps> = ({ entry, rawMode }) => {
         {level}
       </span>
 
-      {/* Pod badge */}
-      <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800/80 text-slate-300 border border-slate-700/60 truncate max-w-[140px] shrink-0">
-        {podName}
-      </span>
+      {/* Pod badge — click to isolate this pod's stream */}
+      {onPodClick ? (
+        <button
+          onClick={() => onPodClick(podName)}
+          className="text-[10px] px-2 py-0.5 rounded bg-slate-800/80 text-slate-300 border border-slate-700/60 truncate max-w-[140px] shrink-0 hover:text-cyan-300 hover:border-cyan-500/40 transition"
+          title={`Show only logs from ${podName}`}
+        >
+          {podName}
+        </button>
+      ) : (
+        <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800/80 text-slate-300 border border-slate-700/60 truncate max-w-[140px] shrink-0">
+          {podName}
+        </span>
+      )}
 
       {/* Log message */}
       <div className="flex-1 break-all text-slate-200 leading-relaxed overflow-hidden">

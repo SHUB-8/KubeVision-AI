@@ -1,6 +1,5 @@
 import React from 'react';
 import { Endpoint } from '../../types/api';
-import { Layers, Activity, AlertTriangle, ArrowUpRight } from 'lucide-react';
 
 interface EndpointListProps {
   endpoints: Endpoint[];
@@ -54,35 +53,38 @@ export const EndpointList: React.FC<EndpointListProps> = ({ endpoints, loading }
                   </span>
                 </td>
                 <td className="p-3 text-right text-slate-200">
-                  {ep.rate.toFixed(2)}/s
-                  {ep.rateSource === 'traces' && (
-                    <span
-                      className="ml-1 text-[9px] text-slate-500"
-                      title="Derived from sampled traces, not a full request count."
-                    >
-                      trace
-                    </span>
+                  {ep.rate > 0 ? (
+                    `${ep.rate.toFixed(2)}/s`
+                  ) : (
+                    <span className="text-slate-500">not measured</span>
                   )}
                 </td>
-                <td className={`p-3 text-right font-semibold ${hasErrors ? 'text-rose-400' : 'text-slate-400'}`}>
-                  {(ep.errorRate * 100).toFixed(1)}%
+                <td className={`p-3 text-right font-semibold ${ep.rate > 0 ? (hasErrors ? 'text-rose-400' : 'text-slate-400') : 'text-slate-500'}`}>
+                  {ep.rate > 0 ? `${(ep.errorRate * 100).toFixed(1)}%` : 'not measured'}
+                  {ep.rate > 0 && ep.errorRateSource && ep.errorRateSource !== 'metrics' && (
+                    <span className="ml-1 text-[9px] font-normal text-slate-500">{ep.errorRateSource}</span>
+                  )}
                 </td>
                 <td className="p-3 text-right text-slate-300">
-                  {(ep.latencyP50 * 1000).toFixed(1)} ms
+                  {ep.latencyP50 > 0 ? (
+                    `${(ep.latencyP50 * 1000).toFixed(1)} ms`
+                  ) : (
+                    <span className="text-slate-500">not measured</span>
+                  )}
                 </td>
                 <td className={`p-3 text-right font-semibold ${isSlowP95 ? 'text-amber-400' : 'text-slate-200'}`}>
-                  {(ep.latencyP95 * 1000).toFixed(1)} ms
-                  {ep.latencySource === 'traces' && (
-                    <span
-                      className="ml-1 text-[9px] font-normal text-slate-500"
-                      title="Derived from sampled traces, not a full request count."
-                    >
-                      trace
-                    </span>
+                  {ep.latencyP95 > 0 ? (
+                    `${(ep.latencyP95 * 1000).toFixed(1)} ms`
+                  ) : (
+                    <span className="text-slate-500">not measured</span>
                   )}
                 </td>
                 <td className="p-3 text-right text-slate-400">
-                  {(ep.latencyP99 * 1000).toFixed(1)} ms
+                  {ep.latencyP99 > 0 ? (
+                    `${(ep.latencyP99 * 1000).toFixed(1)} ms`
+                  ) : (
+                    <span className="text-slate-500">not measured</span>
+                  )}
                 </td>
               </tr>
             );

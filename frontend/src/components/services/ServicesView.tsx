@@ -1,8 +1,7 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
 import { api } from '../../services/api';
-import { Service, Endpoint } from '../../types/api';
-import { MetricCard } from '../common/MetricCard';
+import { Service, Endpoint, MetricSource } from '../../types/api';
 import { formatMs, formatPercent, formatRate } from '../../lib/format';
 import { StatusBadge } from '../common/StatusBadge';
 import { LoadingSpinner } from '../common/LoadingSpinner';
@@ -11,27 +10,25 @@ import { EndpointList } from './EndpointList';
 import { BaselinesModal } from './BaselinesModal';
 import {
   Server,
-  Activity,
-  AlertTriangle,
   GitBranch,
   Terminal,
   Database,
   Search,
   ChevronDown,
   ChevronRight,
-  TrendingUp,
-  Layers,
-  Zap,
 } from 'lucide-react';
 
-/**
- * eBPF instrumentation currently covers Go services natively; other runtimes
- * are discovered from the K8s API but report no RED metrics until the OTel SDK
- * is injected. A zero rate with zero latency means "not measured", which must
- * not be presented as "healthy at 0% errors".
- */
-const NO_TELEMETRY_HINT =
-  'No eBPF telemetry for this service. Beyla instruments Go natively; Java/Node/Python/.NET need OTel SDK injection.';
+const NO_METRIC_HINT = 'No matching metric was returned in the selected time window.';
+
+const sourceLabel = (source?: MetricSource) => {
+  switch (source) {
+    case 'metrics': return 'metrics';
+    case 'client-observed': return 'client-observed';
+    case 'traces': return 'trace';
+    case 'estimated': return 'est.';
+    default: return '';
+  }
+};
 
 export const ServicesView: React.FC = () => {
   const {
@@ -56,22 +53,38 @@ export const ServicesView: React.FC = () => {
   // Active baseline modal service
   const [baselineModalService, setBaselineModalService] = useState<string | null>(null);
 
-  const fetchServices = async () => {
-    setLoading(true);
+  const requestSeq = useRef(0);
+  const isFirstRender = useRef(true);
+
+  const fetchServices = async (background = false) => {
+    if (!background) setLoading(true);
     setError(null);
+    const seq = ++requestSeq.current;
     try {
       const data = await api.getServices(activeNamespace, timeWindow);
+      if (seq !== requestSeq.current) return;
       setServices(data);
     } catch (err: any) {
+      if (seq !== requestSeq.current) return;
       setError(err.message);
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   };
 
   useEffect(() => {
     fetchServices();
-  }, [activeNamespace, timeWindow, refreshCount]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeNamespace, timeWindow]);
+
+  useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
+    fetchServices(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshCount]);
 
   // Arriving from the topology panel's "Metrics" shortcut: narrow the list
   // to that service and expand its endpoints once loaded.
@@ -147,36 +160,31 @@ export const ServicesView: React.FC = () => {
   );
 
   return (
-    <div className="p-4 lg:p-8 space-y-6">
-      {/* Metric Cards Row */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <MetricCard
-          title="Discovered Services"
-          value={services.length}
-          subtitle={`Namespace: ${activeNamespace}`}
-          icon={<Server className="w-4 h-4 text-cyan-400" />}
-        />
-        <MetricCard
-          title="Pod Replicas"
-          value={`${totalReady} / ${totalReplicas}`}
-          subtitle="Available / Desired"
-          icon={<Layers className="w-4 h-4 text-indigo-400" />}
-        />
-        <MetricCard
-          title="Aggregate Rate"
-          value={totalRate.toFixed(1)}
-          unit="req/s"
-          subtitle="eBPF RED throughput"
-          icon={<Zap className="w-4 h-4 text-emerald-400" />}
-        />
-        <MetricCard
-          title="Max P95 Latency"
-          value={(maxLatency * 1000).toFixed(0)}
-          unit="ms"
-          subtitle="Across all microservices"
-          status={maxLatency > 0.5 ? 'warning' : 'normal'}
-          icon={<Activity className="w-4 h-4 text-amber-400" />}
-        />
+    <div className="p-4 lg:p-8 space-y-4">
+      {/* Summary strip — one line, only measured values */}
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-1 px-4 py-2.5 rounded-md border border-slate-800 bg-slate-900/60 text-xs">
+        <span className="text-slate-400">
+          Services
+          <span className="ml-1.5 font-mono text-slate-100">{services.length}</span>
+        </span>
+        <span className="text-slate-400">
+          Pods ready
+          <span className={`ml-1.5 font-mono ${totalReady < totalReplicas ? 'text-amber-400' : 'text-slate-100'}`}>
+            {totalReady}/{totalReplicas}
+          </span>
+        </span>
+        {totalRate > 0 && (
+          <span className="text-slate-400">
+            Aggregate rate
+            <span className="ml-1.5 font-mono text-slate-100">{totalRate.toFixed(1)} req/s</span>
+          </span>
+        )}
+        <span className="text-slate-400">
+          Max P95
+          <span className={`ml-1.5 font-mono ${maxLatency > 0.5 ? 'text-amber-400' : 'text-slate-100'}`}>
+            {maxLatency > 0 ? formatMs(maxLatency * 1000) : '—'}
+          </span>
+        </span>
       </div>
 
       {/* Controls Bar: Search & Sort */}
@@ -209,13 +217,13 @@ export const ServicesView: React.FC = () => {
 
       {/* Main Services Table / List */}
       {loading ? (
-        <LoadingSpinner message="Polling services & Beyla metrics..." size="lg" />
+        <LoadingSpinner message="Loading services…" size="lg" />
       ) : error ? (
         <EmptyState
           title="Failed to Load Services"
           description={error}
           actionText="Retry"
-          onAction={fetchServices}
+          onAction={() => fetchServices()}
         />
       ) : filteredAndSortedServices.length === 0 ? (
         <EmptyState
@@ -229,7 +237,9 @@ export const ServicesView: React.FC = () => {
             const isLoadingEp = !!loadingEndpoints[svc.name];
             const hasErrors = svc.errorRate > 0.01;
             const isHighLatency = svc.latencyP95 > 0.5;
-            const hasTelemetry = svc.rate > 0 || svc.latencyP95 > 0;
+            const hasRate = svc.rate > 0;
+            const hasMeasuredRate = hasRate && svc.rateSource === 'metrics';
+            const hasLatency = svc.latencyP95 > 0;
 
             return (
               <div
@@ -238,8 +248,10 @@ export const ServicesView: React.FC = () => {
               >
                 {/* Service Header Row */}
                 <div className="p-4 sm:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  {/* Left: Expander, Name & Replicas */}
-                  <div className="flex items-center gap-3">
+                  {/* Left: Expander, Name & Replicas. Fixed width on md+ so the
+                      RED columns below align across rows regardless of name and
+                      source-label length ("client-observed" vs "metrics"). */}
+                  <div className="flex items-center gap-3 md:w-[20rem] md:shrink-0">
                     <button
                       onClick={() => toggleEndpoints(svc.name)}
                       className="p-1 rounded-lg text-slate-400 hover:text-cyan-400 hover:bg-slate-800 transition"
@@ -273,19 +285,23 @@ export const ServicesView: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Middle: RED Telemetry Metrics */}
-                  <div className="grid grid-cols-3 gap-4 font-mono text-xs border-y md:border-y-0 md:border-x border-slate-800 py-3 md:py-0 md:px-6">
+                  {/* Middle: RED Telemetry Metrics. Fixed width on md+ keeps the
+                      three columns aligned across every row. */}
+                  <div className="grid grid-cols-3 gap-4 font-mono text-xs border-y md:border-y-0 md:border-x border-slate-800 py-3 md:py-0 md:px-6 md:w-[24rem] md:shrink-0">
                     <div>
                       <span className="text-[10px] text-slate-400 uppercase tracking-wider block">
                         Rate
                       </span>
                       <span
                         className={`text-sm font-semibold ${
-                          hasTelemetry ? 'text-slate-200' : 'text-slate-500'
+                          hasRate ? 'text-slate-200' : 'text-slate-500'
                         }`}
-                        title={hasTelemetry ? undefined : NO_TELEMETRY_HINT}
+                        title={hasRate ? undefined : NO_METRIC_HINT}
                       >
-                        {hasTelemetry ? formatRate(svc.rate) : 'no data'}
+                        {hasRate ? formatRate(svc.rate) : 'no data'}
+                        {hasRate && svc.rateSource && (
+                          <span className="ml-1 text-[9px] text-slate-500">{sourceLabel(svc.rateSource)}</span>
+                        )}
                       </span>
                     </div>
 
@@ -295,15 +311,15 @@ export const ServicesView: React.FC = () => {
                       </span>
                       <span
                         className={`text-sm font-semibold ${
-                          !hasTelemetry
+                          !hasMeasuredRate
                             ? 'text-slate-500'
                             : hasErrors
                               ? 'text-rose-400'
                               : 'text-slate-300'
                         }`}
-                        title={hasTelemetry ? undefined : NO_TELEMETRY_HINT}
+                        title={hasMeasuredRate ? undefined : NO_METRIC_HINT}
                       >
-                        {hasTelemetry ? formatPercent(svc.errorRate) : 'no data'}
+                        {hasMeasuredRate ? formatPercent(svc.errorRate) : 'no data'}
                       </span>
                     </div>
 
@@ -313,15 +329,18 @@ export const ServicesView: React.FC = () => {
                       </span>
                       <span
                         className={`text-sm font-semibold ${
-                          !hasTelemetry
+                          !hasLatency
                             ? 'text-slate-500'
                             : isHighLatency
                               ? 'text-amber-400'
                               : 'text-slate-200'
                         }`}
-                        title={hasTelemetry ? undefined : NO_TELEMETRY_HINT}
+                        title={hasLatency ? undefined : NO_METRIC_HINT}
                       >
-                        {hasTelemetry ? formatMs(svc.latencyP95 * 1000) : 'no data'}
+                        {hasLatency ? formatMs(svc.latencyP95 * 1000) : 'no data'}
+                        {hasLatency && svc.latencySource && (
+                          <span className="ml-1 text-[9px] text-slate-500">{sourceLabel(svc.latencySource)}</span>
+                        )}
                       </span>
                     </div>
                   </div>

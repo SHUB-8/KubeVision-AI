@@ -1,37 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { api } from '../../services/api';
-import { UISettings, LLMConfig } from '../../types/api';
+import { UISettings } from '../../types/api';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 import {
   Sliders,
   Save,
-  RotateCcw,
-  Bot,
-  BrainCircuit,
   Activity,
   Layers,
-  CheckCircle2,
-  AlertCircle,
-  Database,
 } from 'lucide-react';
-
-const DEFAULT_AGENT_CONFIGS: LLMConfig[] = [
-  { role: 'Orchestrator', provider: 'gemini', model: 'gemini-1.5-pro', temperature: 0.2, maxTokens: 4096, fallbackProvider: 'openai' },
-  { role: 'Metrics Agent', provider: 'groq', model: 'llama-3.3-70b-versatile', temperature: 0.1, maxTokens: 2048, fallbackProvider: 'ollama' },
-  { role: 'Log Agent', provider: 'groq', model: 'llama-3.3-70b-versatile', temperature: 0.1, maxTokens: 2048, fallbackProvider: 'gemini' },
-  { role: 'K8s Event Agent', provider: 'groq', model: 'llama-3.3-70b-versatile', temperature: 0.1, maxTokens: 2048, fallbackProvider: 'ollama' },
-  { role: 'Network Agent', provider: 'groq', model: 'llama-3.3-70b-versatile', temperature: 0.1, maxTokens: 2048, fallbackProvider: 'gemini' },
-  { role: 'RCA Generator', provider: 'openai', model: 'gpt-4o', temperature: 0.3, maxTokens: 8192, fallbackProvider: 'gemini' },
-  { role: 'Self-Validator', provider: 'gemini', model: 'gemini-1.5-flash', temperature: 0.1, maxTokens: 2048, fallbackProvider: 'groq' },
-];
 
 export const SettingsView: React.FC = () => {
   const { config, updateConfigState, addToast } = useApp();
   const [formData, setFormData] = useState<UISettings | null>(config);
-  const [agentConfigs, setAgentConfigs] = useState<LLMConfig[]>(DEFAULT_AGENT_CONFIGS);
   const [saving, setSaving] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<'thresholds' | 'llm' | 'display'>('thresholds');
+  const [activeTab, setActiveTab] = useState<'thresholds' | 'display'>('thresholds');
 
   useEffect(() => {
     if (config) {
@@ -73,20 +56,12 @@ export const SettingsView: React.FC = () => {
     });
   };
 
-  const handleAgentConfigChange = (idx: number, field: keyof LLMConfig, val: any) => {
-    setAgentConfigs((prev) => {
-      const updated = [...prev];
-      updated[idx] = { ...updated[idx], [field]: val };
-      return updated;
-    });
-  };
-
   const handleSave = async () => {
     setSaving(true);
     try {
       const updated = await api.updateConfig(formData);
       updateConfigState(updated);
-      addToast('success', 'System configuration updated & saved to BadgerDB');
+      addToast('success', 'Configuration saved');
     } catch (err: any) {
       addToast('error', `Save failed: ${err.message}`);
     } finally {
@@ -106,8 +81,8 @@ export const SettingsView: React.FC = () => {
             <h2 className="text-base font-bold text-slate-100 tracking-tight">
               KubeVision AI Configuration
             </h2>
-            <p className="text-xs text-slate-400 font-mono">
-              Persisted in BadgerDB (hot-reloadable telemetry & ML parameters)
+            <p className="text-xs text-slate-400">
+              Alert thresholds and display preferences, persisted across restarts
             </p>
           </div>
         </div>
@@ -135,31 +110,19 @@ export const SettingsView: React.FC = () => {
           }`}
         >
           <Activity className="w-4 h-4" />
-          <span>Thresholds & ML Screening</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('llm')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-md transition ${
-            activeTab === 'llm'
-              ? 'bg-slate-800 text-cyan-300 font-semibold border border-slate-700'
-              : 'text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          <Bot className="w-4 h-4" />
-          <span>Multi-Agent LLM Setup</span>
+          <span>Alert Thresholds</span>
         </button>
 
         <button
           onClick={() => setActiveTab('display')}
           className={`flex items-center gap-2 px-4 py-2 rounded-md transition ${
             activeTab === 'display'
-              ? 'bg-slate-800 text-emerald-400 font-semibold border border-slate-700'
+              ? 'bg-slate-800 text-cyan-400 font-semibold border border-slate-700'
               : 'text-slate-400 hover:text-slate-200'
           }`}
         >
           <Layers className="w-4 h-4" />
-          <span>Display & Telemetry Overlays</span>
+          <span>Display</span>
         </button>
       </div>
 
@@ -250,113 +213,6 @@ export const SettingsView: React.FC = () => {
             </div>
           </div>
 
-          {/* ML Anomaly Pipeline Detection Parameters */}
-          <div className="p-6 rounded-md bg-slate-900/60 border border-slate-800 space-y-4">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">
-              Two-Stage Machine Learning Parameters
-            </h3>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs font-mono">
-              <div className="p-4 rounded-md bg-slate-800/40 border border-slate-700/60">
-                <span className="text-slate-400 text-[10px] block">Isolation Forest Cutoff</span>
-                <span className="text-cyan-400 font-bold text-sm">0.75</span>
-                <p className="text-[11px] text-slate-400 mt-1">Stage 1 screening threshold</p>
-              </div>
-
-              <div className="p-4 rounded-md bg-slate-800/40 border border-slate-700/60">
-                <span className="text-slate-400 text-[10px] block">Confidence Gate</span>
-                <span className="text-emerald-400 font-bold text-sm">0.92</span>
-                <p className="text-[11px] text-slate-400 mt-1">Fast-tracks directly past LSTM</p>
-              </div>
-
-              <div className="p-4 rounded-md bg-slate-800/40 border border-slate-700/60">
-                <span className="text-slate-400 text-[10px] block">LSTM Autoencoder</span>
-                <span className="text-cyan-300 font-medium text-sm">Z-Score &gt; 3.0</span>
-                <p className="text-[11px] text-slate-400 mt-1">Temporal verification cutoff</p>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Multi-Agent LLM Tab */}
-      {activeTab === 'llm' && (
-        <div className="space-y-4">
-          <div className="p-4 rounded-md bg-slate-900 border border-slate-700 text-xs font-mono text-slate-300">
-            <strong>Hot-reloadable LLM settings:</strong> Each agent role can use a tailored model
-            (e.g. ultra-fast Groq for evidence gathering, and OpenAI GPT-4o or Gemini 1.5 Pro for comprehensive RCA synthesis).
-          </div>
-
-          <div className="border border-slate-800 rounded-md overflow-hidden bg-slate-900/60">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs font-mono">
-                <thead className="bg-slate-800/60 text-slate-400 border-b border-slate-800 text-[10px] uppercase">
-                  <tr>
-                    <th className="p-3">Agent Role</th>
-                    <th className="p-3">Provider</th>
-                    <th className="p-3">Model</th>
-                    <th className="p-3">Temperature</th>
-                    <th className="p-3">Max Tokens</th>
-                    <th className="p-3">Fallback</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60">
-                  {agentConfigs.map((ag, idx) => (
-                    <tr key={ag.role} className="hover:bg-slate-800/30">
-                      <td className="p-3 font-semibold text-slate-200">{ag.role}</td>
-                      <td className="p-3">
-                        <select
-                          value={ag.provider}
-                          onChange={(e) => handleAgentConfigChange(idx, 'provider', e.target.value)}
-                          className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-cyan-300 text-xs font-mono focus:outline-none focus:border-cyan-500"
-                        >
-                          <option value="groq">Groq</option>
-                          <option value="gemini">Gemini</option>
-                          <option value="openai">OpenAI</option>
-                          <option value="ollama">Ollama (Local)</option>
-                        </select>
-                      </td>
-                      <td className="p-3">
-                        <input
-                          type="text"
-                          value={ag.model}
-                          onChange={(e) => handleAgentConfigChange(idx, 'model', e.target.value)}
-                          className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-slate-200 text-xs font-mono w-44 focus:outline-none focus:border-cyan-500"
-                        />
-                      </td>
-                      <td className="p-3">
-                        <input
-                          type="number"
-                          step="0.05"
-                          min="0"
-                          max="1"
-                          value={ag.temperature}
-                          onChange={(e) => handleAgentConfigChange(idx, 'temperature', parseFloat(e.target.value))}
-                          className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-slate-200 text-xs font-mono w-16 focus:outline-none focus:border-cyan-500"
-                        />
-                      </td>
-                      <td className="p-3">
-                        <input
-                          type="number"
-                          step="512"
-                          min="1024"
-                          max="16384"
-                          value={ag.maxTokens}
-                          onChange={(e) => handleAgentConfigChange(idx, 'maxTokens', parseInt(e.target.value))}
-                          className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-slate-200 text-xs font-mono w-20 focus:outline-none focus:border-cyan-500"
-                        />
-                      </td>
-                      <td className="p-3">
-                        <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700 text-[10px] uppercase font-semibold">
-                          {ag.fallbackProvider}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
         </div>
       )}
 

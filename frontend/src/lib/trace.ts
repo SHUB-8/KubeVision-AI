@@ -28,3 +28,17 @@ export function traceDurationMs(trace: Trace): number | null {
 export function traceSpanCount(trace: Trace): number {
   return trace.spanCount ?? trace.spans?.length ?? 0;
 }
+
+/**
+ * Absolute start of the trace in epoch nanoseconds, from the earliest span.
+ * The trace list has no "when did this happen" column today — this makes one
+ * possible without a backend change.
+ */
+export function traceStartNs(trace: Trace): number | null {
+  let minStart = Number.POSITIVE_INFINITY;
+  for (const span of trace.spans ?? []) {
+    if (!Number.isFinite(span.startTime)) continue;
+    minStart = Math.min(minStart, span.startTime);
+  }
+  return Number.isFinite(minStart) ? minStart : null;
+}

@@ -7,6 +7,7 @@ import { DependencyGraph } from './components/topology/DependencyGraph';
 import { ServicesView } from './components/services/ServicesView';
 import { TracesView } from './components/traces/TracesView';
 import { LogsView } from './components/logs/LogsView';
+import { EventsView } from './components/events/EventsView';
 import { ClusterView } from './components/cluster/ClusterView';
 import { IncidentsView } from './components/incidents/IncidentsView';
 import { SettingsView } from './components/settings/SettingsView';
@@ -16,15 +17,29 @@ const VIEWS: Record<string, React.ComponentType> = {
   services: ServicesView,
   traces: TracesView,
   logs: LogsView,
+  events: EventsView,
   cluster: ClusterView,
   incidents: IncidentsView,
   settings: SettingsView,
 };
 
 const MainContent: React.FC = () => {
-  const { activeTab } = useApp();
+  const { activeTab,
+    configReady,
+  } = useApp();
   const View = VIEWS[activeTab] ?? DependencyGraph;
   const meta = TABS.find((t) => t.id === activeTab);
+
+  // Gate data views until the persisted config has been applied: mounting them
+  // earlier fires one request without the saved namespace and a second one
+  // right after — doubling the backend's most expensive calls on every load.
+  if (false && !configReady) {
+    return (
+      <main className="flex-1 min-h-0 overflow-y-auto flex items-center justify-center">
+        <div className="text-slate-500 text-sm font-mono animate-pulse">Loading configuration…</div>
+      </main>
+    );
+  }
 
   return (
     <main className="flex-1 min-h-0 overflow-y-auto">

@@ -21,18 +21,21 @@ interface ServiceNodeData {
 
 export const ServiceNode = memo(({ data, selected }: NodeProps<any>) => {
   const nodeData = data as ServiceNodeData;
+  const isExternal = nodeData.type === 'external';
+  const isCrossNamespace = nodeData.type === 'cross-namespace';
   const hasErrors = (nodeData.errorRate || 0) > 0.01;
   const isHighLatency = (nodeData.latencyP95 || 0) > 0.5;
 
   let borderColor = 'border-slate-700/80 hover:border-cyan-500/60';
-  let badgeColor = 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20';
 
-  if (hasErrors) {
+  if (isExternal) {
+    borderColor = 'border-slate-600 border-dashed hover:border-slate-400';
+  } else if (isCrossNamespace) {
+    borderColor = 'border-violet-500/60 border-dashed hover:border-violet-300';
+  } else if (hasErrors) {
     borderColor = 'border-rose-500/80';
-    badgeColor = 'bg-rose-500/10 text-rose-400 border-rose-500/30';
   } else if (isHighLatency) {
     borderColor = 'border-amber-500/80';
-    badgeColor = 'bg-amber-500/10 text-amber-400 border-amber-500/30';
   } else if (selected) {
     borderColor = 'border-cyan-400 ring-2 ring-cyan-500/30';
   }
@@ -49,10 +52,13 @@ export const ServiceNode = memo(({ data, selected }: NodeProps<any>) => {
   // non-Go services are dark while Go services report, the cause is almost
   // always the HOST KERNEL - Clang LTO/ThinLTO mangles the kprobe symbols the
   // generic tracer attaches to, which aborts the whole generic tracer.
-  const noDataHint =
-    'No eBPF telemetry for this service. If every non-Go service is dark while Go services ' +
-    'report, suspect the host kernel: Clang LTO/ThinLTO builds mangle the kprobe symbols the ' +
-    'generic tracer needs. Verify with: grep unix_stream_recvmsg /proc/kallsyms';
+  const noDataHint = isExternal
+    ? 'External dependency: no Kubernetes workload metrics are available for this node.'
+    : isCrossNamespace
+      ? 'Dependency in another namespace. Its workload metrics are outside the selected namespace view.'
+      : 'No eBPF telemetry for this service. If every non-Go service is dark while Go services ' +
+        'report, suspect the host kernel: Clang LTO/ThinLTO builds mangle the kprobe symbols the ' +
+        'generic tracer needs. Verify with: grep unix_stream_recvmsg /proc/kallsyms';
 
   // Provenance. Rendered as plain text rather than an icon so the caveat is
   // visible without hovering - the whole point is that the number is weaker
@@ -100,7 +106,7 @@ export const ServiceNode = memo(({ data, selected }: NodeProps<any>) => {
         className="!bg-indigo-400 !w-2.5 !h-2.5 !border-slate-950"
       />
 
-      {/* Top row: Name & Pods / Status Badge */}
+      {/* Top row: Name and workload / boundary label */}
       <div className="flex items-start justify-between gap-2 mb-2">
         <div className="flex items-center overflow-hidden">
           <span className="font-semibold text-sm text-slate-100 truncate tracking-tight" title={nodeData.label}>
@@ -108,10 +114,24 @@ export const ServiceNode = memo(({ data, selected }: NodeProps<any>) => {
           </span>
         </div>
 
-        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-slate-700/80 bg-slate-800/80 text-slate-300 font-medium flex items-center gap-1 shrink-0">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          {nodeData.ready ?? 1}/{nodeData.replicas ?? 1}
-        </span>
+        {isExternal || isCrossNamespace ? (
+          <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border font-medium shrink-0 ${
+            isCrossNamespace
+              ? 'border-violet-500/30 bg-violet-500/10 text-violet-300'
+              : 'border-slate-600 bg-slate-800 text-slate-400'
+          }`}>
+            {isCrossNamespace ? nodeData.namespace || 'cross-namespace' : 'external'}
+          </span>
+        ) : nodeData.replicas !== undefined ? (
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-slate-700/80 bg-slate-800/80 text-slate-300 font-medium flex items-center gap-1 shrink-0">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+            {nodeData.ready ?? 0}/{nodeData.replicas}
+          </span>
+        ) : (
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border border-slate-700/80 bg-slate-800/80 text-slate-400 font-medium shrink-0">
+            service
+          </span>
+        )}
       </div>
 
       {/* Bottom metrics row */}
@@ -119,7 +139,7 @@ export const ServiceNode = memo(({ data, selected }: NodeProps<any>) => {
         <div title={hasRate ? sourceNote(nodeData.rateSource) : noDataHint}>
           <span className="text-slate-400 text-[10px] uppercase block tracking-wider">Inbound Req</span>
           <span className={`font-medium ${hasRate ? 'text-slate-200' : 'text-slate-500'}`}>
-            {hasRate ? `${nodeData.rate!.toFixed(1)} req/s` : 'no data'}
+            {hasRate ? `${nodeData.rate!.toFixed(2)} req/s` : 'no data'}
             {hasRate && sourceTag(nodeData.rateSource) && (
               <span className="ml-1 text-[9px] font-normal text-slate-500">{sourceTag(nodeData.rateSource)}</span>
             )}
@@ -133,7 +153,7 @@ export const ServiceNode = memo(({ data, selected }: NodeProps<any>) => {
               !hasLatency ? 'text-slate-500' : isHighLatency ? 'text-amber-400' : 'text-slate-200'
             }`}
           >
-            {hasLatency ? `${(nodeData.latencyP95! * 1000).toFixed(0)} ms` : 'no data'}
+            {hasLatency ? `${(nodeData.latencyP95! * 1000).toFixed(2)} ms` : 'no data'}
             {hasLatency && sourceTag(nodeData.latencySource) && (
               <span className="ml-1 text-[9px] font-normal text-slate-500">{sourceTag(nodeData.latencySource)}</span>
             )}
