@@ -28,3 +28,6 @@ kubevision-extra/
 .vscode/
 .DS_Store
 .npm-cache/
+
+# Local-only research and design documents (never commit)
+docs/
