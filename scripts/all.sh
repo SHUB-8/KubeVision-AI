@@ -405,6 +405,8 @@ start_backend() {
     LOKI_URL="http://localhost:3100" \
     TEMPO_URL="http://localhost:3200" \
     OBSERVED_NAMESPACE="${OBSERVED_NAMESPACE:-boutique}" \
+    KUBEVISION_MODE=development \
+    CORS_ALLOWED_ORIGINS="http://localhost:5173,http://127.0.0.1:5173" \
     FRONTEND_DIR="${FRONTEND_DIR:-frontend/dist}" \
       exec ./bin/kubevision-backend
   fi
@@ -416,6 +418,8 @@ start_backend() {
   LOKI_URL="http://localhost:3100" \
   TEMPO_URL="http://localhost:3200" \
   OBSERVED_NAMESPACE="${OBSERVED_NAMESPACE:-boutique}" \
+  KUBEVISION_MODE=development \
+  CORS_ALLOWED_ORIGINS="http://localhost:5173,http://127.0.0.1:5173" \
   FRONTEND_DIR="${FRONTEND_DIR:-frontend/dist}" \
     nohup ./bin/kubevision-backend > "$RUN_DIR/backend.log" 2>&1 &
   echo $! > "$RUN_DIR/backend.pid"

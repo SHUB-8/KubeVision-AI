@@ -3,11 +3,12 @@
 # KubeVision AI — Observed Demo Application (Google microservices-demo)
 #
 # Manages the boutique demo workload in ns/boutique.
-# Calls scripts/setup-phase2.sh --instrument to automatically apply OpenTelemetry instrumentation.
+# Observed unmodified: KubeVision is eBPF-only (Beyla). The demo app is NOT
+# instrumented with any SDK, NOT restarted after deploy, and carries no
+# OpenTelemetry annotations (see SRS 1.1: zero application changes).
 #
 # Usage:
-#   scripts/demo-app.sh install        # deploy boutique + auto-instrument via setup-phase2.sh --instrument
-#   scripts/demo-app.sh otel           # re-apply OpenTelemetry instrumentation only
+#   scripts/demo-app.sh install        # deploy boutique (untouched)
 #   scripts/demo-app.sh status         # inspect running demo pods
 #   scripts/demo-app.sh scale 0        # pause demo (frees ~1.5GB RAM; stops loadgen)
 #   scripts/demo-app.sh scale 1        # resume all 11 microservices + loadgen
@@ -31,21 +32,11 @@ case "${1:-}" in
     echo "--- Waiting for frontend service to be ready ---"
     kubectl -n "$NS" rollout status deploy/frontend --timeout=300s
 
-    echo "--- Enabling OpenTelemetry Auto-Instrumentation ---"
-    ./scripts/setup-phase2.sh --instrument "$NS"
-
     echo ""
-    echo "Demo app is up! Loadgenerator is generating traffic."
+    echo "Demo app is up! (Deployed unmodified — no SDK, no sidecars;"
+    echo "Beyla instruments it from the node via eBPF.) Loadgenerator is generating traffic."
     echo "View pods with:        ./scripts/demo-app.sh status"
     echo "Open in browser with:  ./scripts/demo-app.sh port-forward"
-    ;;
-
-  otel|instrument)
-    if ! kubectl get namespace "$NS" >/dev/null 2>&1; then
-      echo "Namespace '$NS' not found. Run: $0 install"
-      exit 1
-    fi
-    ./scripts/setup-phase2.sh --instrument "$NS"
     ;;
 
   status)
@@ -84,11 +75,10 @@ case "${1:-}" in
 
   -h|--help|help)
     cat << EOF
-Usage: $0 {install|otel|status|scale 0|1|port-forward|delete}
+Usage: $0 {install|status|scale 0|1|port-forward|delete}
 
 Commands:
-  install        Deploy boutique demo app and apply OpenTelemetry auto-instrumentation
-  otel           Re-apply OpenTelemetry instrumentation and context propagation
+  install        Deploy boutique demo app (unmodified — eBPF-only observability)
   status         Show running microservice pods in ns/boutique
   scale <n>      Scale all boutique deployments to <n> replicas (e.g., scale 0 to pause)
   port-forward   Forward boutique storefront to http://localhost:8080
@@ -98,7 +88,7 @@ EOF
     ;;
 
   *)
-    echo "Usage: $0 {install|otel|status|scale 0|1|port-forward|delete}"
+    echo "Usage: $0 {install|status|scale 0|1|port-forward|delete}"
     exit 1
     ;;
 esac
