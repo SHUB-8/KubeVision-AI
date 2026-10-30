@@ -59,39 +59,49 @@ spec:
   endpoints:
     - port: metrics
       interval: 15s
-      # Preserve the per-process instance identifiers Beyla sets itself
+      # Preserve the per-process instance identifiers the exporter sets itself
       honorLabels: true
 ---
-# Beyla 3.x only starts Application Observability mode when at least one
-# process-selection criterion is set (BEYLA_OPEN_PORT, BEYLA_AUTO_TARGET_EXE,
-# or discovery selectors - see Config.appO11yEnabled in the Beyla source).
+# OBI (OpenTelemetry eBPF Instrumentation — Beyla's successor project) only starts
+# Application Observability mode when at least one process-selection criterion is
+# set (OTEL_EBPF_OPEN_PORT, OTEL_EBPF_AUTO_TARGET_EXE, or discovery selectors).
 # Env vars can't express the services list, so selection lives in this file.
 #
-# Instrumentation coverage: Beyla instruments every supported language on its
-# own - no SDK injection required. Verified on this cluster: 12/12 boutique
-# services report RED metrics (Go, Python, Node, .NET and Java alike).
-# Go is instrumented with uprobes; every other runtime goes through the generic
-# network tracer, which attaches kprobes BY KERNEL SYMBOL NAME.
+# Instrumentation coverage: OBI instruments every supported language on its own -
+# no SDK injection required. Verified on this cluster: 12/12 boutique services
+# report RED metrics (Go, Python, Node, .NET and Java alike). Go is instrumented
+# with uprobes; every other runtime goes through the generic network tracer,
+# which attaches kprobes BY KERNEL SYMBOL NAME.
 #
-# HOST REQUIREMENT (this is what silently breaks non-Go coverage):
-# kernels built with Clang LTO/ThinLTO mangle internal symbol names, so a
-# Required kprobe such as `unix_stream_recvmsg` cannot attach and Beyla aborts
-# the ENTIRE generic tracer. Go services keep reporting while every non-Go
-# service goes dark - with no error surfaced anywhere in the UI.
-# Observed on CachyOS `linux-cachyos` >= 6.11.2 (ThinLTO default since Oct 2024);
-# its GCC-built `linux-cachyos-lts` / `linux-cachyos-gcc` variants are unaffected.
+# HOST REQUIREMENTS (these silently break non-Go coverage):
+# 1. Kernels built with Clang LTO/ThinLTO mangle internal symbol names, so a
+#    Required kprobe such as `unix_stream_recvmsg` cannot attach and OBI aborts
+#    the ENTIRE generic tracer. Go services keep reporting while every non-Go
+#    service goes dark - with no error surfaced anywhere in the UI.
+#    Observed on CachyOS `linux-cachyos` >= 6.11.2 (ThinLTO default since Oct 2024);
+#    its GCC-built `linux-cachyos-lts` / `linux-cachyos-gcc` variants are unaffected.
+# 2. Kernel lockdown must be [none] (Secure-Boot integrity mode disables
+#    bpf_probe_write_user, the helper behind HTTP/2 context injection). The
+#    /sys/kernel/security mount below lets OBI verify this itself.
 #
 # Preflight before trusting any new node (all three must pass):
 #   test -f /sys/kernel/btf/vmlinux                                              # BTF required (CO-RE)
 #   grep -cE ' (unix_stream_recvmsg|__x64_unix_stream_recvmsg)$' /proc/kallsyms  # 0 => LTO => non-Go dead
 #   cat /sys/kernel/security/lockdown                                            # must show [none]
+#
+# MIGRATION NOTES (Beyla 3.36 -> OBI 0.15, 2026-10-27):
+# - Env vars: OBI reads ONLY the OTEL_EBPF_* prefix (Beyla accepted BEYLA_* too).
+# - Config file schema is unchanged (discovery/routes v1 YAML still documented at
+#   devdocs/config/CONFIG.md in the OBI repo); the file is renamed for accuracy.
+# - Exported METRIC NAMES change prefix: beyla_* -> obi_* (e.g. the network flow
+#   metrics queried by the backend). Backend PromQL was updated in the same change.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: beyla-config
   namespace: monitoring
 data:
-  beyla-config.yml: |
+  obi-config.yml: |
     discovery:
       instrument:
         - k8s_namespace: boutique
@@ -132,7 +142,7 @@ spec:
         - operator: Exists
       containers:
         - name: beyla
-          image: grafana/beyla:3.33.0
+          image: otel/ebpf-instrument:v0.15.2
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
@@ -141,53 +151,48 @@ spec:
                 - SYS_ADMIN
           env:
             # Prometheus scrape endpoint (scraped via the ServiceMonitor below)
-            - name: BEYLA_PROMETHEUS_PORT
+            - name: OTEL_EBPF_PROMETHEUS_PORT
               value: "8999"
-            # Metric groups: RED metrics, span metrics, service graph, network flows
-            # https://grafana.com/docs/beyla/latest/configure/export-data/
+            # Metric groups used by KubeVision: RED metrics and network flows.
+            # https://opentelemetry.io/docs/zero-code/obi/configure/
             #
-            # application_span is REQUIRED for application_service_graph to emit
-            # anything. The graph is computed from Beyla's own generated spans, so
-            # with the graph group enabled but the span group missing, the feature
-            # is silently empty - no error, no warning, just zero series.
-            # Verified on this cluster: 0 traces_service_graph_* families without
-            # application_span, 8 families + 10 real edges with it.
-            - name: BEYLA_PROMETHEUS_FEATURES
-              value: "application,application_span,application_service_graph,network"
-            # Trace-context propagation BETWEEN processes. Library-level injection
-            # into Go binaries is the part that connects Beyla-only callers to
-            # SDK-instrumented callees.
+            # Span metrics and service graph metrics are not queried by KubeVision.
+            # The measured service graph also contains fewer edges than the client
+            # metric families, so do not pay their cardinality and memory cost.
+            - name: OTEL_EBPF_PROMETHEUS_FEATURES
+              value: "application,network"
+            # NOTE: do not set OTEL_EBPF_PROMETHEUS_EXTRA_RESOURCE_ATTRIBUTES
+            # here. OBI 0.15 stopped exporting service.name as a metric-level
+            # label on the RED families (pkg/export/attributes/attr_defs.go
+            # pins ServiceName: false; it is a resource attribute only), but
+            # passing "service.name,service.namespace" through this env PANICS
+            # the agent at startup (swarm instancer buildGraph, observed on
+            # v0.15.2) — and it would not have restored the label anyway: it
+            # only affects span/network-stats metadata. The backend handles
+            # the gap by grouping k8s_owner_name alongside service_name and
+            # falling back through prometheus.MetricServiceName().
+            # Trace-context propagation BETWEEN processes. With no SDKs anywhere
+            # (eBPF-only deployment), OBI is the ONLY span producer, so its own
+            # propagation is REQUIRED for traces to stitch across service hops.
+            # Valid values: disabled | all (library-level injection into supported
+            # runtimes + network-level header injection for everything else).
             #
-            # MUST STAY "disabled" on this stack: the Go services now run their
-            # own OTel SDK (ENABLE_TRACING=1 via scripts/setup-phase2.sh), and
-            # Beyla auto-disables its own span export for those processes - but
-            # the network-level injector keeps writing traceparent headers that
-            # reference spans Beyla no longer exports. On HTTP/2/gRPC Beyla
-            # cannot see that the app SDK already wrote its own header, so the
-            # two injectors race; when Beyla's wins, the callee joins a trace
-            # whose parent span is never stored ("orphan": parentSpanId set,
-            # parent span missing). Measured on this cluster with propagation
-            # "all": adservice 12/12 orphans, cartservice 16/16, recommendation
-            # 13/13, currency 0% stitched. With "disabled": ZERO orphans and
-            # 100% stitching on every SDK-to-SDK edge (currency went 0% -> 100%,
-            # productcatalog 38/38, adservice/cart/rec all stitched).
-            #
-            # Trade-off: loadgenerator (Python, no SDK) -> frontend no longer
-            # stitches (library-level propagation is Go-only), so the loadgen
-            # client span becomes its own single-span root trace. Every
-            # application-internal edge stitches, which is what RCA needs.
+            # HISTORY (kept so nobody re-introduces the SDK race blindly): when Go
+            # services ran their own OTel SDK (ENABLE_TRACING=1), propagation "all"
+            # made the collector's network injector race the SDK's header writer on
+            # HTTP/2/gRPC - orphans everywhere (adservice 12/12, cartservice 16/16,
+            # currency 0% stitched). The SDK path has since been REMOVED from this
+            # stack, which also removes that race; propagation is back to "all".
             #
             # The FIONREAD sockhash bug (commit 929e30f93125 - observed on this
-            # 6.18 LTS) only affects the network-level injector, so with
-            # propagation disabled the tracefs mount below is no longer
-            # required for correctness; it is kept because mounting is harmless
-            # and future Beyla features may need it.
-            - name: BEYLA_BPF_CONTEXT_PROPAGATION
-              value: "disabled"
+            # 6.18 LTS) only affects the network-level injector. Mounting tracefs
+            # below is required for it and kept.
+            - name: OTEL_EBPF_BPF_CONTEXT_PROPAGATION
+              value: "all"
             # Decorate metrics/traces with k8s.namespace.name / k8s.pod.name /
             # ... resource attributes. REQUIRED: the backend's PromQL filters
             # on the k8s_namespace_name label.
-            - name: BEYLA_KUBE_METADATA_ENABLE
+            - name: OTEL_EBPF_KUBE_METADATA_ENABLE
               value: "true"
             # OTLP trace export -> Tempo (traces only; metrics are scraped via Prometheus :8999)
             - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
@@ -195,8 +200,8 @@ spec:
             - name: OTEL_METRICS_EXPORTER
               value: "none"
             # Process selection + anything env vars can't express
-            - name: BEYLA_CONFIG_PATH
-              value: "/config/beyla-config.yml"
+            - name: OTEL_EBPF_CONFIG_PATH
+              value: "/config/obi-config.yml"
           ports:
             - containerPort: 8999
               name: metrics
@@ -210,12 +215,17 @@ spec:
             - mountPath: /sys/kernel/debug
               name: sys-debug
             # Required by the docs for the FIONREAD kernel-bug mitigation and for
-            # network-level context propagation (BEYLA_BPF_CONTEXT_PROPAGATION).
+            # network-level context propagation (OTEL_EBPF_BPF_CONTEXT_PROPAGATION).
             # Without them those code paths cannot run at all.
             - mountPath: /sys/fs/cgroup
               name: cgroup
             - mountPath: /sys/kernel/tracing
               name: tracefs
+            # Lets OBI verify kernel lockdown mode instead of assuming; the
+            # bpf_probe_write_user path used for HTTP/2/gRPC context injection
+            # is unavailable under integrity lockdown.
+            - mountPath: /sys/kernel/security
+              name: kernel-security
       volumes:
         - name: config
           configMap:
@@ -236,3 +246,6 @@ spec:
         - name: tracefs
           hostPath:
             path: /sys/kernel/tracing
+        - name: kernel-security
+          hostPath:
+            path: /sys/kernel/security
