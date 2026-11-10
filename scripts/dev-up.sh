@@ -53,7 +53,7 @@ stop_backend() {
     fi
     echo "  backend (pid $pid) stopped"
   else
-    pkill -f "bin/kubevision-backend" 2>/dev/null && echo "  backend stopped" || echo "  backend not running"
+    echo "  backend not running (no live PID file)"
   fi
   rm -f "$RUN_DIR/backend.pid"
 
@@ -73,12 +73,20 @@ stop_frontend() {
     kill "$(cat "$RUN_DIR/frontend.pid")" 2>/dev/null || true
     echo "  frontend (pid $(cat "$RUN_DIR/frontend.pid")) stopped"
   fi
-  pkill -f "vite" 2>/dev/null || true
   rm -f "$RUN_DIR/frontend.pid"
 }
 
 stop_forwards() {
   LOG "Stopping port-forwards"
+  local pidfile pid
+  for pidfile in "$RUN_DIR"/port-forward-*.pid; do
+    [ -f "$pidfile" ] || continue
+    pid="$(cat "$pidfile" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pidfile"
+  done
   pkill -f "kubectl -n monitoring port-forward" 2>/dev/null && echo "  forwards stopped" || echo "  forwards not running"
 }
 
@@ -89,7 +97,9 @@ ensure_forwards() {
     if probe "$lport"; then
       LOG "Forward :$lport already up"
     else
-      nohup kubectl -n monitoring port-forward "$svc" "$lport:$rport" >/dev/null 2>&1 &
+      nohup kubectl -n monitoring port-forward "$svc" "$lport:$rport" \
+        > "$RUN_DIR/port-forward-$lport.log" 2>&1 &
+      echo $! > "$RUN_DIR/port-forward-$lport.pid"
       started="$started $!"
     fi
   done
@@ -124,6 +134,8 @@ start_backend() {
     LOKI_URL=http://localhost:3100 \
     TEMPO_URL=http://localhost:3200 \
     OBSERVED_NAMESPACE="${OBSERVED_NAMESPACE:-boutique}" \
+    KUBEVISION_MODE=development \
+    CORS_ALLOWED_ORIGINS="http://localhost:5173,http://127.0.0.1:5173" \
     FRONTEND_DIR="${FRONTEND_DIR:-frontend/dist}" \
       exec ./bin/kubevision-backend
   fi
@@ -135,6 +147,8 @@ start_backend() {
   LOKI_URL=http://localhost:3100 \
   TEMPO_URL=http://localhost:3200 \
   OBSERVED_NAMESPACE="${OBSERVED_NAMESPACE:-boutique}" \
+  KUBEVISION_MODE=development \
+  CORS_ALLOWED_ORIGINS="http://localhost:5173,http://127.0.0.1:5173" \
   FRONTEND_DIR="${FRONTEND_DIR:-frontend/dist}" \
     nohup ./bin/kubevision-backend > "$RUN_DIR/backend.log" 2>&1 &
   echo $! > "$RUN_DIR/backend.pid"
@@ -193,13 +207,15 @@ start_frontend_dev() {
 
 sync_cluster_stack() {
   LOG "Applying in-cluster observability stack..."
-  ./scripts/setup-phase2.sh
+  ./scripts/setup.sh stack
 }
 
 ensure_cluster_stack() {
-  if kubectl -n monitoring get pods >/dev/null 2>&1 \
-     && [ "$(kubectl -n monitoring get pods --no-headers 2>/dev/null | grep -c Running)" -ge 4 ]; then
-    LOG "Stack already running in cluster"
+  local ready
+  ready="$(kubectl -n monitoring get pods --no-headers 2>/dev/null | \
+    awk '$2 ~ /^[0-9]+\/[0-9]+$/ && $3=="Running" {split($2,a,"/"); if (a[1]==a[2]) c++} END {print c+0}')"
+  if kubectl -n monitoring get pods >/dev/null 2>&1 && [ "${ready:-0}" -ge 4 ]; then
+    LOG "Stack already running in cluster (${ready} pods Ready)"
   else
     LOG "Stack missing - running setup"
     sync_cluster_stack
@@ -208,8 +224,8 @@ ensure_cluster_stack() {
 
 show_status() {
   echo "=== KubeVision Dev Environment Status ==="
-  if curl -sf -m 2 localhost:8090/api/v1/health >/dev/null 2>&1; then
-    echo "  Backend:       HEALTHY (http://localhost:8090)"
+  if curl -sf -m 2 "localhost:${PORT:-8090}/api/v1/health" >/dev/null 2>&1; then
+    echo "  Backend:       HEALTHY (http://localhost:${PORT:-8090})"
   else
     echo "  Backend:       NOT RUNNING"
   fi
@@ -282,6 +298,11 @@ for arg in "$@"; do
       show_help
       exit 0
       ;;
+    *)
+      echo "Unknown option: $arg" >&2
+      show_help >&2
+      exit 1
+      ;;
   esac
 done
 
@@ -291,7 +312,7 @@ if [ "$ACTION" = "stop" ]; then
   stop_backend
   stop_frontend
   stop_forwards
-  LOG "Cluster left running. To pause in-cluster stores: ./scripts/stack.sh pause"
+  LOG "Cluster left running. To pause in-cluster stores: ./scripts/all.sh stack pause (discards Prometheus/Tempo history)"
   exit 0
 fi
 
@@ -363,4 +384,3 @@ else
 fi
 
 echo "API health: curl localhost:8090/api/v1/health"
-
