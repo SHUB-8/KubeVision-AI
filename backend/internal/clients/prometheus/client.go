@@ -446,6 +446,43 @@ func (c *Client) GetDBServerLatency(namespace, window, quantile string) (json.Ra
 	return c.Query(context.Background(), query)
 }
 
+// GetServiceLanguages returns service_name -> runtime language from the
+// target_info series OBI exports for every instrumented process.
+//
+// telemetry_sdk_language is a direct observation: OBI writes the language it
+// detected in the target process (or the language an SDK-instrumented service
+// declares for itself), never its own Go exporter runtime. Because the series
+// exists for every discovered process, this does not depend on somebody having
+// opened the Traces view, unlike the trace-resource fallback.
+func (c *Client) GetServiceLanguages(namespace string) (map[string]string, error) {
+	query := fmt.Sprintf(`target_info{k8s_namespace_name=%q,telemetry_sdk_language!=""}`, namespace)
+	raw, err := c.Query(context.Background(), query)
+	if err != nil {
+		return nil, err
+	}
+	return ParseServiceLanguages(raw), nil
+}
+
+// ParseServiceLanguages maps a target_info instant vector to service language
+// pairs. Series without a usable service name or language are skipped rather
+// than guessed.
+func ParseServiceLanguages(raw json.RawMessage) map[string]string {
+	results, err := ParseVector(raw)
+	if err != nil {
+		return nil
+	}
+	languages := make(map[string]string, len(results))
+	for _, result := range results {
+		service := strings.TrimSpace(result.Metric["service_name"])
+		language := strings.ToLower(strings.TrimSpace(result.Metric["telemetry_sdk_language"]))
+		if service == "" || language == "" {
+			continue
+		}
+		languages[service] = language
+	}
+	return languages
+}
+
 func ParseVector(raw json.RawMessage) ([]VectorResult, error) {
 	var results []VectorResult
 	if err := json.Unmarshal(raw, &results); err != nil {

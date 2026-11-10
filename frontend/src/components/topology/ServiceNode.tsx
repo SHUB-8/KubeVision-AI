@@ -2,12 +2,14 @@ import React, { memo } from 'react';
 import { Handle, Position, NodeProps } from '@xyflow/react';
 import { AlertTriangle } from 'lucide-react';
 import type { MetricSource } from '../../types/api';
+import { languageLabel } from '../common/LanguageBadge';
 
 interface ServiceNodeData {
   label: string;
   type: string;
   namespace: string;
   protocol?: string;
+  language?: string;
   rate?: number;
   errorRate?: number;
   latencyP95?: number;
@@ -108,10 +110,18 @@ export const ServiceNode = memo(({ data, selected }: NodeProps<any>) => {
 
       {/* Top row: Name and workload / boundary label */}
       <div className="flex items-start justify-between gap-2 mb-2">
-        <div className="flex items-center overflow-hidden">
+        <div className="flex items-center gap-1.5 min-w-0 overflow-hidden">
           <span className="font-semibold text-sm text-slate-100 truncate tracking-tight" title={nodeData.label}>
             {nodeData.label}
           </span>
+          {nodeData.language && (
+            <span
+              title={`Runtime language reported by telemetry for ${nodeData.label}: ${nodeData.language}`}
+              className="shrink-0 px-1 py-px rounded bg-slate-800 border border-slate-700 text-[9px] leading-4 text-violet-300 font-mono"
+            >
+              {languageLabel(nodeData.language)}
+            </span>
+          )}
         </div>
 
         {isExternal || isCrossNamespace ? (

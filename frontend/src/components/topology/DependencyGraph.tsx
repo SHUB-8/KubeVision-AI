@@ -265,6 +265,7 @@ export const DependencyGraph: React.FC = () => {
             label: node.label || node.id,
             type: node.type,
             namespace: node.namespace || activeNamespace,
+            language: node.language || svc?.language,
             rate,
             errorRate: node.errorRate ?? svc?.errorRate ?? undefined,
             latencyP95,
@@ -558,6 +559,7 @@ export const DependencyGraph: React.FC = () => {
           <NodeDetailPanel
             serviceName={selected.id}
             onClose={() => setSelectedNodeId(null)}
+            language={selected.data?.language}
             stats={{
               errorRate: selected.data?.errorRate,
               latencyP95: selected.data?.latencyP95,

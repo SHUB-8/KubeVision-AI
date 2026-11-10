@@ -6,6 +6,7 @@ import { formatMs, formatPercent, formatRate } from '../../lib/format';
 import { StatusBadge } from '../common/StatusBadge';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 import { EmptyState } from '../common/EmptyState';
+import { LanguageBadge } from '../common/LanguageBadge';
 import { EndpointList } from './EndpointList';
 import { BaselinesModal } from './BaselinesModal';
 import {
@@ -281,6 +282,9 @@ export const ServicesView: React.FC = () => {
                         <span className="text-slate-300">
                           {svc.ready}/{svc.replicas} Pods Ready
                         </span>
+                        {svc.language && (
+                          <LanguageBadge language={svc.language} />
+                        )}
                       </div>
                     </div>
                   </div>

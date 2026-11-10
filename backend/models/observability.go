@@ -26,6 +26,11 @@ type Node struct {
 	Type       string  `json:"type"`
 	Namespace  string  `json:"namespace"`
 	Protocol   string  `json:"protocol,omitempty"`
+	// Language is the runtime OBI or the service's own SDK reported via the
+	// telemetry.sdk.language attribute ("go", "java", "nodejs", ...). Observed
+	// telemetry only: never inferred from an image name or a port number, and
+	// empty for external / cross-namespace nodes that have no local process.
+	Language   string  `json:"language,omitempty"`
 	Rate       float64 `json:"rate,omitempty"`
 	ErrorRate  float64 `json:"errorRate,omitempty"`
 	LatencyP95 float64 `json:"latencyP95,omitempty"`
@@ -61,6 +66,10 @@ type Service struct {
 	Replicas  int32             `json:"replicas"`
 	Ready     int32             `json:"ready"`
 	Labels    map[string]string `json:"labels,omitempty"`
+	// Language is the runtime the service's spans report via the
+	// telemetry.sdk.language resource attribute ("go", "java", "nodejs", ...).
+	// Empty when the service has not produced any trace yet.
+	Language string `json:"language,omitempty"`
 	// RED metrics sourced from Beyla via Prometheus or borrowed from a topology
 	// edge. Zero when there was no measurement in the requested window.
 	Rate          float64 `json:"rate"`

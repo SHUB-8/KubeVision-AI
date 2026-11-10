@@ -14,10 +14,13 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { LoadingSpinner } from '../common/LoadingSpinner';
+import { languageLabel } from '../common/LanguageBadge';
 
 interface NodeDetailPanelProps {
   serviceName: string;
   onClose: () => void;
+  /** Runtime language reported by telemetry for this node, when known. */
+  language?: string;
   /** Live RED stats of the selected node, for degraded-state actions. */
   stats?: { errorRate?: number; latencyP95?: number; rate?: number };
 }
@@ -25,6 +28,7 @@ interface NodeDetailPanelProps {
 export const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
   serviceName,
   onClose,
+  language,
   stats,
 }) => {
   const { activeNamespace, timeWindow, setActiveTab, setSelectedService, setLogSeed, setTraceSeed } = useApp();
@@ -95,7 +99,17 @@ export const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
             <h3 className="text-sm font-bold text-slate-100 truncate" title={serviceName}>
               {serviceName}
             </h3>
-            <p className="text-[11px] font-mono text-slate-400">ns: {activeNamespace}</p>
+            <p className="text-[11px] font-mono text-slate-400">
+              ns: {activeNamespace}
+              {language && (
+                <span
+                  title={`Runtime language reported by telemetry: ${language}`}
+                  className="ml-1.5 px-1 py-px rounded bg-slate-800 border border-slate-700 text-[10px] text-violet-300"
+                >
+                  {languageLabel(language)}
+                </span>
+              )}
+            </p>
           </div>
         </div>
         <button

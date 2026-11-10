@@ -200,6 +200,11 @@ func (h *Handlers) GetTopology(c *gin.Context) {
 	}
 
 	serveCachedJSON(c, "topology:"+namespace+":"+window, 5*time.Second, func() (any, error) {
-		return h.topologySvc.GetTopology(c.Request.Context(), namespace, window)
+		topology, err := h.topologySvc.GetTopology(c.Request.Context(), namespace, window)
+		if err != nil {
+			return nil, err
+		}
+		attachNodeLanguages(topology, h.serviceLanguages(c.Request.Context(), namespace))
+		return topology, nil
 	})
 }

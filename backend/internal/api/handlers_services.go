@@ -1,12 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"github.com/gin-gonic/gin"
 	prometheus "github.com/kubevision/backend/internal/clients/prometheus"
 	"github.com/kubevision/backend/models"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -23,6 +25,17 @@ func (h *Handlers) GetServices(c *gin.Context) {
 	if h.k8sClient == nil {
 		c.JSON(http.StatusOK, []models.Service{})
 		return
+	}
+
+	// Backfill the Tempo side of the language map on dashboard refreshes; the
+	// warm-up throttles itself to one search per interval and runs in the
+	// background so this request's latency never depends on it.
+	if h.tempoClient != nil {
+		warmCtx, cancelWarm := context.WithTimeout(context.Background(), 10*time.Second)
+		go func() {
+			defer cancelWarm()
+			h.tempoClient.WarmServiceLanguages(warmCtx)
+		}()
 	}
 
 	serveCachedJSON(c, "services:"+namespace+":"+window, 5*time.Second, func() (any, error) {
@@ -148,8 +161,22 @@ func (h *Handlers) GetServices(c *gin.Context) {
 		for _, svc := range serviceMap {
 			services = append(services, *svc)
 		}
-		return services, nil
+		return attachServiceLanguages(services, h.serviceLanguages(c.Request.Context(), namespace)), nil
 	})
+}
+
+// attachServiceLanguages maps each service to whatever runtime language the
+// eBPF collection (OBI) observed for it. No inference beyond the telemetry:
+// when OBI reports nothing (service not traced yet, or language unknown),
+// the field is simply left unset and the UI renders no language badge.
+func attachServiceLanguages(services []models.Service, langs map[string]string) []models.Service {
+	for i := range services {
+		lang := strings.TrimSpace(langs[services[i].Name])
+		if lang != "" {
+			services[i].Language = lang
+		}
+	}
+	return services
 }
 
 func setServiceRate(svc *models.Service, value float64, source string) {

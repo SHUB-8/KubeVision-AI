@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +23,18 @@ type Client struct {
 	client       *http.Client
 	traceCacheMu sync.Mutex
 	traceCache   map[string]cachedTrace
+
+	// languages maps service name -> runtime language as reported by the
+	// telemetry.sdk.language resource attribute every OBI-instrumented trace
+	// batch carries. Populated opportunistically while parsing traces. Guarded
+	// by langsMu together with langVotes / warmAt / warming.
+	langsMu sync.Mutex
+	langs   map[string]string
+	// langVotes counts observations per service/language so a single
+	// mis-attributed span cannot flip a service's language.
+	langVotes map[string]map[string]int
+	warmAt    time.Time
+	warming   bool
 }
 
 const (
@@ -425,6 +438,9 @@ func (c *Client) GetTrace(ctx context.Context, traceID string) ([]models.Span, e
 					StatusCode:    raw.Status.Code,
 					Attributes:    attrs,
 				}
+				if lang := strings.TrimSpace(resourceAttr(batch.Resource.Attributes, "telemetry.sdk.language")); lang != "" && serviceName != "" {
+					c.noteLanguage(serviceName, lang)
+				}
 				if kind != "" {
 					attrs["span.kind"] = kind
 				}
@@ -599,4 +615,154 @@ func extractServiceName(attrs []spanAttr) string {
 		}
 	}
 	return "unknown"
+}
+
+// noteLanguage records the runtime language of a service as reported by its
+// resource attributes (telemetry.sdk.language). The winner is the language with
+// the most observations, not the newest one: OBI can attribute a helper process
+// to a service (documented behaviour under hostPID / port-based selection), and
+// a single such span must not relabel the service. A conflicting observation
+// only takes over once it outnumbers the incumbent.
+func (c *Client) noteLanguage(service, lang string) {
+	service = strings.TrimSpace(service)
+	lang = strings.ToLower(strings.TrimSpace(lang))
+	if service == "" || lang == "" {
+		return
+	}
+	c.langsMu.Lock()
+	defer c.langsMu.Unlock()
+	if c.langs == nil {
+		c.langs = make(map[string]string)
+	}
+	if c.langVotes == nil {
+		c.langVotes = make(map[string]map[string]int)
+	}
+	votes := c.langVotes[service]
+	if votes == nil {
+		votes = make(map[string]int)
+		c.langVotes[service] = votes
+	}
+	votes[lang]++
+	if votes[lang] > votes[c.langs[service]] {
+		c.langs[service] = lang
+	}
+}
+
+// ServiceLanguages returns a snapshot of service -> language pairs learned so
+// far. Empty when no traced service has reported a language yet.
+func (c *Client) ServiceLanguages() map[string]string {
+	c.langsMu.Lock()
+	defer c.langsMu.Unlock()
+	out := make(map[string]string, len(c.langs))
+	for k, v := range c.langs {
+		out[k] = v
+	}
+	return out
+}
+
+// resourceAttr returns a resource attribute's string value from an OTLP batch.
+func resourceAttr(attrs []spanAttr, key string) string {
+	for _, a := range attrs {
+		if a.Key == key {
+			return a.Value.StringValue
+		}
+	}
+	return ""
+}
+
+const languageWarmInterval = 2 * time.Minute
+
+// WarmServiceLanguages backfills the service-language map after a cold start
+// by sampling a handful of recent traces. Languages are otherwise learned as a
+// side effect of trace fetches, which only happens once someone browses the
+// Traces view. Throttled: while a warm-up ran recently (or is running) it
+// returns immediately, so callers may invoke it on every dashboard refresh.
+// Runs inline (typically <1s: one search plus up to 8 cached trace fetches);
+// call it from a goroutine to keep request latency unchanged.
+// languageTraceStartUnixNano parses the start time of a Tempo search result.
+// Local to the language warm-up so the feature does not depend on the
+// trace-listing helpers.
+func languageTraceStartUnixNano(t tempoTrace) int64 {
+	if t.StartTimeUnixNano == "" {
+		return 0
+	}
+	v, err := strconv.ParseInt(t.StartTimeUnixNano, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+func (c *Client) WarmServiceLanguages(ctx context.Context) {
+	c.langsMu.Lock()
+	if c.warming || time.Since(c.warmAt) < languageWarmInterval {
+		c.langsMu.Unlock()
+		return
+	}
+	c.warming = true
+	c.langsMu.Unlock()
+	defer func() {
+		c.langsMu.Lock()
+		c.warming = false
+		c.warmAt = time.Now()
+		c.langsMu.Unlock()
+	}()
+
+	params := url.Values{}
+	params.Set("limit", "400")
+	params.Set("minDuration", minSearchDuration)
+	u := fmt.Sprintf("%s/api/search?%s", c.baseURL, params.Encode())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		slog.Warn("language warm-up search failed", "error", err)
+		return
+	}
+	defer resp.Body.Close()
+	var searchResp searchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
+		slog.Warn("language warm-up search parse failed", "error", err)
+		return
+	}
+
+	candidates := make([]tempoTrace, 0, len(searchResp.Traces))
+	for _, t := range searchResp.Traces {
+		if isSystemOrHealthOperation(t.RootTraceName) {
+			continue
+		}
+		candidates = append(candidates, t)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return languageTraceStartUnixNano(candidates[i]) > languageTraceStartUnixNano(candidates[j])
+	})
+
+	// Diverse sample: one trace per distinct root service so a single chatty
+	// root (loadgenerator) cannot monopolise the batch limit.
+	seenRoot := make(map[string]struct{}, 16)
+	sample := make([]string, 0, 16)
+	for _, t := range candidates {
+		if _, dup := seenRoot[t.RootServiceName]; dup {
+			continue
+		}
+		seenRoot[t.RootServiceName] = struct{}{}
+		sample = append(sample, t.TraceID)
+		if len(sample) >= 8 {
+			break
+		}
+	}
+
+	var wg sync.WaitGroup
+	for _, id := range sample {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			if _, err := c.GetTrace(ctx, id); err != nil {
+				slog.Warn("language warm-up trace fetch failed", "trace_id", id, "error", err)
+			}
+		}(id)
+	}
+	wg.Wait()
 }

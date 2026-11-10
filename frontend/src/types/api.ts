@@ -23,6 +23,11 @@ export interface Node {
   type: string;
   namespace: string;
   protocol?: string;
+  /** Runtime language reported by telemetry (OBI target_info and trace
+      resource attributes): "go" | "java" | "nodejs" | "python" | "cpp" | ...
+      Empty when no instrumented process reported one — never inferred from an
+      image name. */
+  language?: string;
   rate?: number;
   errorRate?: number;
   latencyP95?: number;
@@ -57,6 +62,9 @@ export interface Service {
   replicas: number;
   ready: number;
   labels?: Record<string, string>;
+  /** Runtime language reported by the service's trace resource attributes:
+      "go" | "java" | "nodejs" | "python" | "cpp" | "ruby" | ... */
+  language?: string;
   rate: number;
   errorRate: number;
   latencyP95: number;
