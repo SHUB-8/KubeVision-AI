@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tempo
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tempo
+  template:
+    metadata:
+      labels:
+        app: tempo
+    spec:
+      containers:
+        - name: tempo
+          # 3.1.1 (2026-10-21) is a security-only patch (Go 1.27.3,
+          # CVE-2026-56857/56866/78659/78660/78663/78667/78669/94439/94440/
+          # 94448/97030-97032/111943). Config is unchanged.
+          image: grafana/tempo:3.1.1
+          args:
+            - "-config.file=/etc/tempo/tempo.yaml"
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3200
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          ports:
+            - containerPort: 3200
+              name: http
+            - containerPort: 4317
+              name: otlp-grpc
+            - containerPort: 4318
+              name: otlp-http
+          volumeMounts:
+            - name: tempo-conf
+              mountPath: /etc/tempo
+            - name: tempo-data
+              mountPath: /var/tempo
+      volumes:
+        - name: tempo-conf
+          configMap:
+            name: tempo-conf
+        - name: tempo-data
+          emptyDir: {}

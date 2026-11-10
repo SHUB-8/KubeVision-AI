@@ -1,0 +1,16 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: beyla
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: beyla
+  endpoints:
+    - port: metrics
+      interval: 15s
+      # Preserve the per-process instance identifiers the exporter sets itself
+      honorLabels: true

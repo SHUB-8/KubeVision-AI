@@ -1,0 +1,187 @@
+# Instrumentation coverage: OBI instruments every supported language on its own -
+# no SDK injection required. Verified on this cluster: 12/12 boutique services
+# report RED metrics (Go, Python, Node, .NET and Java alike). Go is instrumented
+# with uprobes; every other runtime goes through the generic network tracer,
+# which attaches kprobes BY KERNEL SYMBOL NAME.
+#
+# HOST REQUIREMENTS (these silently break non-Go coverage):
+# 1. Kernels built with Clang LTO/ThinLTO mangle internal symbol names, so a
+#    Required kprobe such as `unix_stream_recvmsg` cannot attach and OBI aborts
+#    the ENTIRE generic tracer. Go services keep reporting while every non-Go
+#    service goes dark - with no error surfaced anywhere in the UI.
+#    Observed on CachyOS `linux-cachyos` >= 6.11.2 (ThinLTO default since Oct 2024);
+#    its GCC-built `linux-cachyos-lts` / `linux-cachyos-gcc` variants are unaffected.
+# 2. Kernel lockdown must be [none] (Secure-Boot integrity mode disables
+#    bpf_probe_write_user, the helper behind HTTP/2 context injection). The
+#    /sys/kernel/security mount below lets OBI verify this itself.
+#
+# Preflight before trusting any new node (all three must pass):
+#   test -f /sys/kernel/btf/vmlinux                                              # BTF required (CO-RE)
+#   grep -cE ' (unix_stream_recvmsg|__x64_unix_stream_recvmsg)$' /proc/kallsyms  # 0 => LTO => non-Go dead
+#   cat /sys/kernel/security/lockdown                                            # must show [none]
+#
+# MIGRATION NOTES (Beyla 3.36 -> OBI 0.15, 2026-10-27):
+# - Env vars: OBI reads ONLY the OTEL_EBPF_* prefix (Beyla accepted BEYLA_* too).
+# - Config file schema is unchanged (discovery/routes v1 YAML still documented at
+#   devdocs/config/CONFIG.md in the OBI repo); the file is renamed for accuracy
+#   and lives in beyla-configmap.yaml.
+# - Exported METRIC NAMES change prefix: beyla_* -> obi_* (e.g. the network flow
+#   metrics queried by the backend). Backend PromQL was updated in the same change.
+#
+# UPGRADE NOTES (OBI 0.15.2 -> 1.0.0, 2026-11-07):
+# - v1.0.0 (2026-10-30) is the project's first stable release and the start of
+#   the v1 compatibility contract (config, documented env vars, stable telemetry).
+#   Image tag is the only change here.
+# - Config v1 (the discovery:/routes: file in beyla-configmap.yaml) REMAINS
+#   SUPPORTED and is frozen; Config v2 is the forward-looking format. No config
+#   migration is required for this bump - do it deliberately later via
+#   `obi config migrate` if/when v2-specific features are needed.
+# - Known v1.0 limitation: application metrics can stay missing after an observed
+#   Pod starts/restarts until OBI itself restarts. After rolling boutique, check
+#   the RED series; if absent, `kubectl -n monitoring rollout restart ds/beyla`.
+# - Keep the attach-order rule: restart OBI BEFORE restarting observed workloads,
+#   so its HPACK/context state observes connections from their first byte.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: beyla
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: beyla
+  template:
+    metadata:
+      labels:
+        app: beyla
+    spec:
+      hostPID: true
+      hostNetwork: true
+      serviceAccountName: beyla
+      # Use ClusterFirstWithHostNet so the hostNetwork pod automatically uses
+      # the in-cluster DNS resolver across any provider (K3s, EKS, GKE, AKS, bare-metal).
+      dnsPolicy: ClusterFirstWithHostNet
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: beyla
+          image: otel/ebpf-instrument:v1.0.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - SYS_ADMIN
+          env:
+            # Prometheus scrape endpoint (scraped via the ServiceMonitor)
+            - name: OTEL_EBPF_PROMETHEUS_PORT
+              value: "8999"
+            # Metric groups used by KubeVision: RED metrics and network flows.
+            # https://opentelemetry.io/docs/zero-code/obi/configure/
+            #
+            # Span metrics and service graph metrics are not queried by KubeVision.
+            # The measured service graph also contains fewer edges than the client
+            # metric families, so do not pay their cardinality and memory cost.
+            #
+            # application_runtime was tried on 2026-11-10 and reverted. Findings:
+            #   - OBI v1.0.0 DOES ship the Node.js event-loop collector (injected
+            #     perf_hooks agent, OBI PR #2939) and Go/JVM/.NET/Python reporters.
+            #   - Only Go emitted series. Node.js injection logged success but no
+            #     nodejs_* series ever appeared, even with both gates set
+            #     (OTEL_EBPF_METRICS_FEATURES + the deprecated
+            #     OTEL_EBPF_PROMETHEUS_FEATURES).
+            #   - JVM needs the injected Java agent, which requires a writable
+            #     container FS; every workload here is readOnlyRootFilesystem=true.
+            #   - .NET needs OBI's apphost detection (epic #1136, open) first.
+            # Re-enable once Node emission is understood/fixed; until then it only
+            # adds probe and Java-agent injection cost.
+            - name: OTEL_EBPF_PROMETHEUS_FEATURES
+              value: "application,network"
+            # NOTE: do not set OTEL_EBPF_PROMETHEUS_EXTRA_RESOURCE_ATTRIBUTES
+            # here. OBI 0.15 stopped exporting service.name as a metric-level
+            # label on the RED families (pkg/export/attributes/attr_defs.go
+            # pins ServiceName: false; it is a resource attribute only), but
+            # passing "service.name,service.namespace" through this env PANICS
+            # the agent at startup (swarm instancer buildGraph, observed on
+            # v0.15.2) — and it would not have restored the label anyway: it
+            # only affects span/network-stats metadata. The backend handles
+            # the gap by grouping k8s_owner_name alongside service_name and
+            # falling back through prometheus.MetricServiceName().
+            # Trace-context propagation BETWEEN processes. With no SDKs anywhere
+            # (eBPF-only deployment), OBI is the ONLY span producer, so its own
+            # propagation is REQUIRED for traces to stitch across service hops.
+            # Valid values: disabled | all (library-level injection into supported
+            # runtimes + network-level header injection for everything else).
+            #
+            # HISTORY (kept so nobody re-introduces the SDK race blindly): when Go
+            # services ran their own OTel SDK (ENABLE_TRACING=1), propagation "all"
+            # made the collector's network injector race the SDK's header writer on
+            # HTTP/2/gRPC - orphans everywhere (adservice 12/12, cartservice 16/16,
+            # currency 0% stitched). The SDK path has since been REMOVED from this
+            # stack, which also removes that race; propagation is back to "all".
+            #
+            # The FIONREAD sockhash bug (commit 929e30f93125 - observed on this
+            # 6.18 LTS) only affects the network-level injector. Mounting tracefs
+            # below is required for it and kept.
+            - name: OTEL_EBPF_BPF_CONTEXT_PROPAGATION
+              value: "all"
+            # Decorate metrics/traces with k8s.namespace.name / k8s.pod.name /
+            # ... resource attributes. REQUIRED: the backend's PromQL filters
+            # on the k8s_namespace_name label.
+            - name: OTEL_EBPF_KUBE_METADATA_ENABLE
+              value: "true"
+            # OTLP trace export -> Tempo (traces only; metrics are scraped via Prometheus :8999)
+            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              value: "http://tempo.monitoring.svc.cluster.local:4318/v1/traces"
+            - name: OTEL_METRICS_EXPORTER
+              value: "none"
+            # Process selection + anything env vars can't express
+            - name: OTEL_EBPF_CONFIG_PATH
+              value: "/config/obi-config.yml"
+          ports:
+            - containerPort: 8999
+              name: metrics
+          volumeMounts:
+            - mountPath: /config
+              name: config
+            - mountPath: /var/run/
+              name: var-run
+            - mountPath: /sys/fs/bpf
+              name: bpffs
+            - mountPath: /sys/kernel/debug
+              name: sys-debug
+            # Required by the docs for the FIONREAD kernel-bug mitigation and for
+            # network-level context propagation (OTEL_EBPF_BPF_CONTEXT_PROPAGATION).
+            # Without them those code paths cannot run at all.
+            - mountPath: /sys/fs/cgroup
+              name: cgroup
+            - mountPath: /sys/kernel/tracing
+              name: tracefs
+            # Lets OBI verify kernel lockdown mode instead of assuming; the
+            # bpf_probe_write_user path used for HTTP/2/gRPC context injection
+            # is unavailable under integrity lockdown.
+            - mountPath: /sys/kernel/security
+              name: kernel-security
+      volumes:
+        - name: config
+          configMap:
+            name: beyla-config
+        - name: var-run
+          hostPath:
+            path: /var/run/
+        - name: bpffs
+          hostPath:
+            path: /sys/fs/bpf
+            type: DirectoryOrCreate
+        - name: sys-debug
+          hostPath:
+            path: /sys/kernel/debug
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+        - name: tracefs
+          hostPath:
+            path: /sys/kernel/tracing
+        - name: kernel-security
+          hostPath:
+            path: /sys/kernel/security

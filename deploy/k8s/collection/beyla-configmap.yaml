@@ -1,0 +1,30 @@
+# OBI (OpenTelemetry eBPF Instrumentation — Beyla's successor project) only starts
+# Application Observability mode when at least one process-selection criterion is
+# set (OTEL_EBPF_OPEN_PORT, OTEL_EBPF_AUTO_TARGET_EXE, or discovery selectors).
+# Env vars can't express the services list, so selection lives in this file.
+#
+# The config file schema is unchanged from Beyla (discovery/routes v1 YAML still
+# documented at devdocs/config/CONFIG.md in the OBI repo); the manifest was split
+# out of the old single beyla.yaml into one file per resource.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: beyla-config
+  namespace: monitoring
+data:
+  obi-config.yml: |
+    discovery:
+      instrument:
+        - k8s_namespace: boutique
+    routes:
+      unmatched: heuristic
+      ignore_mode: all
+      ignored_patterns:
+        - /_healthz
+        - /healthz
+        - /health
+        - /live
+        - /ready
+        - /grpc.health.v1.Health/*
+        - /grpc.health.v1.Health/Check
+        - .*health.*
