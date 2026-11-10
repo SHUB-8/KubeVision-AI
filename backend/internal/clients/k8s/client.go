@@ -3,7 +3,9 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kubevision/backend/models"
@@ -11,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -20,7 +23,23 @@ import (
 type Client struct {
 	clientset   *kubernetes.Clientset
 	clusterName string
+
+	// Short-TTL cache for pod inventories. /services and /topology both list
+	// pods on every request (and every 15s auto-refresh); the List call costs
+	// 100-400ms against the API server. A few seconds of staleness is fine for
+	// dashboards — the /events informer remains the source for event streams.
+	podsMu    sync.Mutex
+	podsCache map[string]podCacheEntry
 }
+
+type podCacheEntry struct {
+	pods    []models.PodInfo
+	expires time.Time
+}
+
+// Just under the 15s auto-refresh so a scheduled refresh mostly reads cache;
+// long enough that the occasional fresh List amortizes across viewers.
+const podsCacheTTL = 12 * time.Second
 
 func NewClient(clusterName string) (*Client, error) {
 	config, err := rest.InClusterConfig()
@@ -40,7 +59,7 @@ func NewClient(clusterName string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
 	}
-	return &Client{clientset: clientset, clusterName: clusterName}, nil
+	return &Client{clientset: clientset, clusterName: clusterName, podsCache: make(map[string]podCacheEntry)}, nil
 }
 
 func (c *Client) ctx() (context.Context, context.CancelFunc) {
@@ -48,6 +67,17 @@ func (c *Client) ctx() (context.Context, context.CancelFunc) {
 }
 
 func (c *Client) GetPods(namespace string) ([]models.PodInfo, error) {
+	// Single-flight: the check, the API list and the store all happen under
+	// one lock, so concurrent requests during a miss WAIT for the fresh list
+	// instead of stampeding the API server (k3s throttles at ~1.3s per list
+	// on this host — two simultaneous misses used to cost 2x that).
+	c.podsMu.Lock()
+	defer c.podsMu.Unlock()
+
+	if entry, ok := c.podsCache[namespace]; ok && time.Now().Before(entry.expires) {
+		return entry.pods, nil
+	}
+
 	ctx, cancel := c.ctx()
 	defer cancel()
 
@@ -73,6 +103,7 @@ func (c *Client) GetPods(namespace string) ([]models.PodInfo, error) {
 			WorkloadName: ExtractWorkloadName(p),
 		})
 	}
+	c.podsCache[namespace] = podCacheEntry{pods: pods, expires: time.Now().Add(podsCacheTTL)}
 	return pods, nil
 }
 
@@ -126,6 +157,116 @@ func (c *Client) GetNamespaces() ([]string, error) {
 		names = append(names, ns.Name)
 	}
 	return names, nil
+}
+
+// WatchWarningEvents persists only Warning events. Informer updates are
+// delivered for repeated Kubernetes Events as their Count and last timestamp
+// change, so callers must upsert from both AddFunc and UpdateFunc.
+func (c *Client) WatchWarningEvents(ctx context.Context, namespaces []string, onWarning func(*corev1.Event)) error {
+	unique := make([]string, 0, len(namespaces))
+	seen := make(map[string]struct{}, len(namespaces))
+	for _, namespace := range namespaces {
+		if namespace == "" {
+			continue
+		}
+		if _, exists := seen[namespace]; exists {
+			continue
+		}
+		seen[namespace] = struct{}{}
+		unique = append(unique, namespace)
+	}
+	if len(unique) == 0 {
+		return fmt.Errorf("no namespaces configured for Kubernetes Event watching")
+	}
+
+	informers := make([]cache.SharedIndexInformer, 0, len(unique))
+	for _, namespace := range unique {
+		listWatch := cache.NewFilteredListWatchFromClient(
+			c.clientset.CoreV1().RESTClient(), "events", namespace,
+			func(*metav1.ListOptions) {},
+		)
+		informer := cache.NewSharedIndexInformer(listWatch, &corev1.Event{}, 0, cache.Indexers{})
+		writeWarning := func(obj interface{}) {
+			event, ok := obj.(*corev1.Event)
+			if !ok || event.Type != corev1.EventTypeWarning || onWarning == nil {
+				return
+			}
+			onWarning(event.DeepCopy())
+		}
+		if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    writeWarning,
+			UpdateFunc: func(_, newObj interface{}) { writeWarning(newObj) },
+		}); err != nil {
+			return fmt.Errorf("register Kubernetes Event informer for namespace %q: %w", namespace, err)
+		}
+		informers = append(informers, informer)
+	}
+
+	for _, informer := range informers {
+		go informer.Run(ctx.Done())
+	}
+	cacheSyncs := make([]cache.InformerSynced, 0, len(informers))
+	for _, informer := range informers {
+		cacheSyncs = append(cacheSyncs, informer.HasSynced)
+	}
+	if !cache.WaitForCacheSync(ctx.Done(), cacheSyncs...) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("Kubernetes Event informer cache failed to sync")
+	}
+	slog.Info("Kubernetes Warning Event informers synchronized", "namespaces", unique)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func EventRecord(event *corev1.Event) models.KubernetesEvent {
+	count := event.Count
+	if count < 1 {
+		count = 1
+	}
+	first := event.FirstTimestamp.Time
+	if first.IsZero() {
+		first = event.EventTime.Time
+	}
+	if first.IsZero() {
+		first = event.CreationTimestamp.Time
+	}
+	last := event.LastTimestamp.Time
+	if event.Series != nil {
+		if event.Series.Count > count {
+			count = event.Series.Count
+		}
+		if !event.Series.LastObservedTime.IsZero() {
+			last = event.Series.LastObservedTime.Time
+		}
+	}
+	if last.IsZero() {
+		last = first
+	}
+	uid := string(event.UID)
+	if uid == "" {
+		uid = "name-" + event.Namespace + "-" + event.Name
+	}
+	component := event.ReportingController
+	if component == "" {
+		component = event.Source.Component
+	}
+	return models.KubernetesEvent{
+		UID:                uid,
+		Namespace:          event.Namespace,
+		Name:               event.Name,
+		Type:               event.Type,
+		Reason:             event.Reason,
+		Message:            event.Message,
+		Count:              count,
+		FirstObservedAt:    first.UTC().Format(time.RFC3339Nano),
+		LastObservedAt:     last.UTC().Format(time.RFC3339Nano),
+		InvolvedObjectKind: event.InvolvedObject.Kind,
+		InvolvedObjectName: event.InvolvedObject.Name,
+		InvolvedObjectUID:  string(event.InvolvedObject.UID),
+		ReportingComponent: component,
+	}
 }
 
 func (c *Client) GetServiceClusterIPs(namespace string) (map[string]string, error) {

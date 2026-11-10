@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/kubevision/backend/internal/clients/prometheus"
@@ -33,8 +34,12 @@ func (b *Baseliner) CalculateBaselines(ctx context.Context, namespace, window st
 	var rateResults []prometheus.VectorResult
 	if err := json.Unmarshal(rateData, &rateResults); err == nil {
 		for _, r := range rateResults {
-			svc := r.Metric["service_name"]
+			svc := prometheus.MetricServiceName(r.Metric)
 			if svc == "" {
+				continue
+			}
+			value, ok := finiteMetric(r.FloatValue())
+			if !ok {
 				continue
 			}
 			key := fmt.Sprintf("baseline:%s:rate:%s", svc, window)
@@ -42,11 +47,11 @@ func (b *Baseliner) CalculateBaselines(ctx context.Context, namespace, window st
 				Service:   svc,
 				Endpoint:  "/",
 				Metric:    "rate",
-				Value:     r.FloatValue(),
+				Value:     value,
 				Window:    window,
 				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 			}
-			if err := b.store.Set(key, baseline); err != nil {
+			if err := b.store.SetWithTTL(key, baseline, storage.DefaultRetentionTTL); err != nil {
 				return fmt.Errorf("failed to store baseline: %w", err)
 			}
 		}
@@ -68,8 +73,12 @@ func (b *Baseliner) CalculateBaselines(ctx context.Context, namespace, window st
 		var latencyResults []prometheus.VectorResult
 		if err := json.Unmarshal(latencyData, &latencyResults); err == nil {
 			for _, r := range latencyResults {
-				svc := r.Metric["service_name"]
+				svc := prometheus.MetricServiceName(r.Metric)
 				if svc == "" {
+					continue
+				}
+				value, ok := finiteMetric(r.FloatValue())
+				if !ok {
 					continue
 				}
 				key := fmt.Sprintf("baseline:%s:latency_%s:%s", svc, q.name, window)
@@ -77,13 +86,13 @@ func (b *Baseliner) CalculateBaselines(ctx context.Context, namespace, window st
 					Service:   svc,
 					Endpoint:  "/",
 					Metric:    fmt.Sprintf("latency_%s", q.name),
-					Value:     r.FloatValue(),
+					Value:     value,
 					Window:    window,
-				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
-			}
-			if err := b.store.Set(key, baseline); err != nil {
-				return fmt.Errorf("failed to store baseline: %w", err)
-			}
+					UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+				}
+				if err := b.store.SetWithTTL(key, baseline, storage.DefaultRetentionTTL); err != nil {
+					return fmt.Errorf("failed to store baseline: %w", err)
+				}
 			}
 		}
 	}
@@ -108,4 +117,14 @@ func (b *Baseliner) GetBaselines(service, window string) ([]models.Baseline, err
 		baselines = append(baselines, bl)
 	}
 	return baselines, nil
+}
+
+// finiteMetric guards baseline values: Prometheus can report NaN or +Inf for
+// empty histograms and division blowups, and neither survives a JSON round
+// trip through the UI. Anything non-finite is treated as no data.
+func finiteMetric(v float64) (float64, bool) {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, false
+	}
+	return v, true
 }

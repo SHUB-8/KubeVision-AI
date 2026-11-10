@@ -2,11 +2,15 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
 )
+
+const DefaultRetentionTTL = 7 * 24 * time.Hour
 
 type Store struct {
 	db *badger.DB
@@ -46,6 +50,37 @@ func (s *Store) SetWithTTL(key string, value interface{}, ttl time.Duration) err
 	return s.db.Update(func(txn *badger.Txn) error {
 		return txn.SetEntry(badger.NewEntry([]byte(key), data).WithTTL(ttl))
 	})
+}
+
+// RunValueLogGC periodically reclaims obsolete value-log data. Badger returns
+// ErrNoRewrite when no file currently meets the discard threshold; that is a
+// normal idle result, not a GC failure.
+func (s *Store) RunValueLogGC(interval time.Duration, discardRatio float64, stop <-chan struct{}) {
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	if discardRatio <= 0 || discardRatio >= 1 {
+		discardRatio = 0.5
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			for {
+				err := s.db.RunValueLogGC(discardRatio)
+				if errors.Is(err, badger.ErrNoRewrite) {
+					break
+				}
+				if err != nil {
+					slog.Warn("Badger value-log GC failed", "error", err)
+					break
+				}
+			}
+		}
+	}
 }
 
 func (s *Store) Get(key string, dest interface{}) error {
