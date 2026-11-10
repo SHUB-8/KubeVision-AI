@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, Rea
 import { HealthResponse, UISettings } from '../types/api';
 import { api } from '../services/api';
 
-export type TabType = 'topology' | 'services' | 'traces' | 'logs' | 'cluster' | 'incidents' | 'settings';
+export type TabType = 'topology' | 'services' | 'traces' | 'logs' | 'events' | 'cluster' | 'incidents' | 'settings';
 
 export interface ToastMessage {
   id: string;
@@ -32,12 +32,41 @@ interface AppContextType {
   setSelectedService: (svc: string | null) => void;
   selectedTraceId: string | null;
   setSelectedTraceId: (traceId: string | null) => void;
+  // One-shot seeds for cross-view navigation with preset filters (e.g. the
+  // topology panel's "error logs" / "slow traces" actions). Consumers apply
+  // the seed once and clear it.
+  logSeed: { keyword?: string } | null;
+  setLogSeed: (seed: { keyword?: string } | null) => void;
+  traceSeed: { minDurationMs?: number } | null;
+  setTraceSeed: (seed: { minDurationMs?: number } | null) => void;
+  /** True once the persisted config (namespace, window) has been applied.
+   *  Views gate their first fetch on this: otherwise every view fires one
+   *  request without the saved namespace and a second one right after. */
+  configReady: boolean;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
+const TAB_IDS: TabType[] = [
+  'topology', 'services', 'traces', 'logs', 'events', 'cluster', 'incidents', 'settings',
+];
+
+/** `#/logs`, `#/traces`, `#/trace/<id>` — shareable and refresh-safe. */
+function parseHash(): { tab: TabType | null; traceId: string | null } {
+  const h = window.location.hash.replace(/^#\/?/, '');
+  if (!h) return { tab: null, traceId: null };
+  const parts = h.split('/');
+  if (parts[0] === 'trace' && parts[1]) {
+    return { tab: 'traces', traceId: decodeURIComponent(parts[1]) };
+  }
+  if ((TAB_IDS as string[]).includes(parts[0])) {
+    return { tab: parts[0] as TabType, traceId: null };
+  }
+  return { tab: null, traceId: null };
+}
+
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [activeTab, setActiveTab] = useState<TabType>('topology');
+  const [activeTab, setActiveTab] = useState<TabType>(() => parseHash().tab ?? 'topology');
   // Empty until the saved config arrives; API calls with an empty namespace
   // fall back to the backend's OBSERVED_NAMESPACE default.
   const [activeNamespace, setActiveNamespace] = useState<string>('');
@@ -49,7 +78,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [config, setConfig] = useState<UISettings | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [selectedService, setSelectedService] = useState<string | null>(null);
-  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
+  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(() => parseHash().traceId);
+  const [logSeed, setLogSeed] = useState<{ keyword?: string } | null>(null);
+  const [traceSeed, setTraceSeed] = useState<{ minDurationMs?: number } | null>(null);
+  const [configReady, setConfigReady] = useState(false);
 
   const addToast = useCallback((type: ToastMessage['type'], message: string) => {
     const id = Math.random().toString(36).substring(2, 9);
@@ -95,6 +127,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
     } catch (err: any) {
       console.warn('Failed to fetch config:', err.message);
+    } finally {
+      // Gate initial view fetches even when the config request fails: the
+      // backend default namespace is used either way, so one fetch is enough.
+      setConfigReady(true);
     }
   }, []);
 
@@ -113,6 +149,28 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }, refreshInterval * 1000);
     return () => clearInterval(interval);
   }, [refreshInterval, triggerRefresh, fetchHealth]);
+
+  // Deep links: keep the URL in step with the visible view (and the open
+  // trace), so any screen can be shared or refreshed in place.
+  useEffect(() => {
+    const hash =
+      selectedTraceId && activeTab === 'traces'
+        ? `#/trace/${selectedTraceId}`
+        : `#/${activeTab}`;
+    if (window.location.hash !== hash) {
+      window.history.pushState(null, '', hash);
+    }
+  }, [activeTab, selectedTraceId]);
+
+  useEffect(() => {
+    const onPop = () => {
+      const { tab, traceId } = parseHash();
+      if (tab) setActiveTab(tab);
+      setSelectedTraceId(traceId);
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
 
   const updateConfigState = useCallback((newConfig: UISettings) => {
     setConfig(newConfig);
@@ -145,6 +203,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setSelectedService,
         selectedTraceId,
         setSelectedTraceId,
+        logSeed,
+        setLogSeed,
+        traceSeed,
+        setTraceSeed,
+        configReady,
       }}
     >
       {children}

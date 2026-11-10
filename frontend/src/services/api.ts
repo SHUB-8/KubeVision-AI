@@ -5,12 +5,34 @@ import {
   Endpoint,
   Trace,
   LogEntry,
+  KubernetesEvent,
   ClusterInfo,
   UISettings,
   Baseline,
 } from '../types/api';
 
 const BASE_URL = '/api/v1';
+const API_TOKEN_KEY = 'kubevision.apiToken';
+
+async function fetchMutation(input: RequestInfo | URL, init: RequestInit): Promise<Response> {
+  const request = (token: string | null) => {
+    const headers = new Headers(init.headers);
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    return fetch(input, { ...init, headers });
+  };
+
+  let token = sessionStorage.getItem(API_TOKEN_KEY);
+  let response = await request(token);
+  if (response.status === 401) {
+    const entered = window.prompt('Enter the KubeVision API token to make this change:');
+    if (entered?.trim()) {
+      token = entered.trim();
+      sessionStorage.setItem(API_TOKEN_KEY, token);
+      response = await request(token);
+    }
+  }
+  return response;
+}
 
 async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -67,16 +89,17 @@ export const api = {
     const params = new URLSearchParams();
     if (namespace) params.set('namespace', namespace);
     if (window) params.set('window', window);
-    const res = await fetch(`${BASE_URL}/baselines/recalculate?${params.toString()}`, {
+    const res = await fetchMutation(`${BASE_URL}/baselines/recalculate?${params.toString()}`, {
       method: 'POST',
     });
     return handleResponse<{ status: string; message: string }>(res);
   },
 
-  async getTraces(serviceName?: string, limit: number = 25): Promise<Trace[]> {
+  async getTraces(serviceName?: string, limit: number = 25, window?: string): Promise<Trace[]> {
     const params = new URLSearchParams();
     if (serviceName) params.set('serviceName', serviceName);
     params.set('limit', limit.toString());
+    if (window) params.set('window', window);
     const res = await fetch(`${BASE_URL}/traces?${params.toString()}`);
     return handleResponse<Trace[]>(res).then((d) => d ?? []);
   },
@@ -112,7 +135,7 @@ export const api = {
   },
 
   async updateConfig(settings: UISettings): Promise<UISettings> {
-    const res = await fetch(`${BASE_URL}/config`, {
+    const res = await fetchMutation(`${BASE_URL}/config`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
@@ -130,5 +153,12 @@ export const api = {
   async getNamespaces(): Promise<string[]> {
     const res = await fetch(`${BASE_URL}/namespaces`);
     return handleResponse<string[]>(res).then((d) => d ?? []);
+  },
+
+  async getKubernetesEvents(namespace?: string, limit: number = 100): Promise<KubernetesEvent[]> {
+    const params = new URLSearchParams({ limit: limit.toString() });
+    if (namespace) params.set('namespace', namespace);
+    const res = await fetch(`${BASE_URL}/events?${params.toString()}`);
+    return handleResponse<KubernetesEvent[]>(res).then((d) => d ?? []);
   },
 };

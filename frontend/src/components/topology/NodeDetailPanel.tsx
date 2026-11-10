@@ -14,17 +14,24 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { LoadingSpinner } from '../common/LoadingSpinner';
+import { languageLabel } from '../common/LanguageBadge';
 
 interface NodeDetailPanelProps {
   serviceName: string;
   onClose: () => void;
+  /** Runtime language reported by telemetry for this node, when known. */
+  language?: string;
+  /** Live RED stats of the selected node, for degraded-state actions. */
+  stats?: { errorRate?: number; latencyP95?: number; rate?: number };
 }
 
 export const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
   serviceName,
   onClose,
+  language,
+  stats,
 }) => {
-  const { activeNamespace, timeWindow, setActiveTab, setSelectedService } = useApp();
+  const { activeNamespace, timeWindow, setActiveTab, setSelectedService, setLogSeed, setTraceSeed } = useApp();
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -54,6 +61,22 @@ export const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
     setActiveTab('traces');
   };
 
+  // Degraded-state actions: jump straight to the evidence instead of making
+  // the user re-type filters. Thresholds match the row coloring used across
+  // the app (>1% errors, >500ms p95).
+  const isDegraded =
+    (stats?.errorRate ?? 0) > 0.01 || (stats?.latencyP95 ?? 0) > 0.5;
+  const goWithErrorLogs = () => {
+    setLogSeed({ keyword: 'error' });
+    setSelectedService(serviceName);
+    setActiveTab('logs');
+  };
+  const goWithSlowTraces = () => {
+    setTraceSeed({ minDurationMs: 100 });
+    setSelectedService(serviceName);
+    setActiveTab('traces');
+  };
+
   const goToLogs = () => {
     setSelectedService(serviceName);
     setActiveTab('logs');
@@ -76,7 +99,17 @@ export const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
             <h3 className="text-sm font-bold text-slate-100 truncate" title={serviceName}>
               {serviceName}
             </h3>
-            <p className="text-[11px] font-mono text-slate-400">ns: {activeNamespace}</p>
+            <p className="text-[11px] font-mono text-slate-400">
+              ns: {activeNamespace}
+              {language && (
+                <span
+                  title={`Runtime language reported by telemetry: ${language}`}
+                  className="ml-1.5 px-1 py-px rounded bg-slate-800 border border-slate-700 text-[10px] text-violet-300"
+                >
+                  {languageLabel(language)}
+                </span>
+              )}
+            </p>
           </div>
         </div>
         <button
@@ -112,6 +145,42 @@ export const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
         </button>
       </div>
 
+      {/* Degraded strip: only when the node is actually failing or slow */}
+      {isDegraded && (
+        <div
+          className={`mx-3 mt-3 rounded-md border p-2.5 text-xs space-y-2 ${
+            (stats?.errorRate ?? 0) > 0.01
+              ? 'border-rose-500/40 bg-rose-500/10 text-rose-200'
+              : 'border-amber-500/40 bg-amber-500/10 text-amber-200'
+          }`}
+        >
+          <div className="flex items-center gap-1.5 font-semibold">
+            <AlertTriangle className="w-3.5 h-3.5" />
+            <span>
+              {(stats?.errorRate ?? 0) > 0.01
+                ? `Failing: ${((stats?.errorRate ?? 0) * 100).toFixed(1)}% errors`
+                : `Slow: p95 ${((stats?.latencyP95 ?? 0) * 1000).toFixed(0)} ms`}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              onClick={goWithErrorLogs}
+              className="flex items-center justify-center gap-1 py-1.5 rounded-md bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 text-rose-200 transition"
+            >
+              <Terminal className="w-3 h-3" />
+              <span>Error logs</span>
+            </button>
+            <button
+              onClick={goWithSlowTraces}
+              className="flex items-center justify-center gap-1 py-1.5 rounded-md bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-200 transition"
+            >
+              <Clock className="w-3 h-3" />
+              <span>Slow traces</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         <div>
@@ -123,7 +192,7 @@ export const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
           </div>
 
           {loading ? (
-            <LoadingSpinner message="Querying Prometheus & Beyla..." size="sm" />
+            <LoadingSpinner message="Loading endpoints…" size="sm" />
           ) : error ? (
             <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs">
               {error}
@@ -154,34 +223,20 @@ export const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
                     <div>
                       <span className="text-slate-400 block">Rate</span>
                       <span className="text-slate-200">
-                        {ep.rate.toFixed(2)}/s
-                        {ep.rateSource === 'traces' && (
-                          <span
-                            className="ml-1 text-[9px] text-slate-500"
-                            title="Derived from sampled traces, not a full request count."
-                          >
-                            trace
-                          </span>
-                        )}
+                        {ep.rate > 0 ? `${ep.rate.toFixed(2)}/s` : <span className="text-slate-500">not measured</span>}
                       </span>
                     </div>
                     <div>
                       <span className="text-slate-400 block">P95</span>
                       <span className="text-slate-200">
-                        {(ep.latencyP95 * 1000).toFixed(0)} ms
-                        {ep.latencySource === 'traces' && (
-                          <span
-                            className="ml-1 text-[9px] text-slate-500"
-                            title="Derived from sampled traces, not a full request count."
-                          >
-                            trace
-                          </span>
-                        )}
+                        {ep.latencyP95 > 0 ? `${(ep.latencyP95 * 1000).toFixed(0)} ms` : <span className="text-slate-500">not measured</span>}
                       </span>
                     </div>
                     <div>
                       <span className="text-slate-400 block">P99</span>
-                      <span className="text-slate-200">{(ep.latencyP99 * 1000).toFixed(0)} ms</span>
+                      <span className="text-slate-200">
+                        {ep.latencyP99 > 0 ? `${(ep.latencyP99 * 1000).toFixed(0)} ms` : <span className="text-slate-500">not measured</span>}
+                      </span>
                     </div>
                   </div>
                 </div>

@@ -15,7 +15,7 @@ export interface HealthResponse {
  *   estimated - borrowed from a peer's measured rate, not observed on this edge
  * Absent (undefined) means "no data" and must render as such, never as 0.
  */
-export type MetricSource = 'metrics' | 'traces' | 'estimated';
+export type MetricSource = 'metrics' | 'client-observed' | 'traces' | 'estimated';
 
 export interface Node {
   id: string;
@@ -23,6 +23,11 @@ export interface Node {
   type: string;
   namespace: string;
   protocol?: string;
+  /** Runtime language reported by telemetry (OBI target_info and trace
+      resource attributes): "go" | "java" | "nodejs" | "python" | "cpp" | ...
+      Empty when no instrumented process reported one — never inferred from an
+      image name. */
+  language?: string;
   rate?: number;
   errorRate?: number;
   latencyP95?: number;
@@ -57,9 +62,14 @@ export interface Service {
   replicas: number;
   ready: number;
   labels?: Record<string, string>;
+  /** Runtime language reported by the service's trace resource attributes:
+      "go" | "java" | "nodejs" | "python" | "cpp" | "ruby" | ... */
+  language?: string;
   rate: number;
   errorRate: number;
   latencyP95: number;
+  rateSource?: MetricSource;
+  latencySource?: MetricSource;
 }
 
 export interface Endpoint {
@@ -72,6 +82,7 @@ export interface Endpoint {
   rate: number;
   errorRate: number;
   rateSource?: MetricSource;
+  errorRateSource?: MetricSource;
   latencySource?: MetricSource;
 }
 
@@ -79,6 +90,23 @@ export interface Span {
   traceId: string;
   spanId: string;
   parentSpanId?: string;
+  /**
+   * True when the original parent span was never exported (Beyla's per-
+   * connection context limitation on multiplexed HTTP/2/gRPC) and the backend
+   * re-attached this span to its caller's hosting span by time-window
+   * adjacency. The link is an inference and must render differently from an
+   * observed parent link.
+   */
+  parentInferred?: boolean;
+  /**
+   * True when the operation name was recovered from the opposite end of the
+   * same call (same trace, matching RPC target + time window) instead of being
+   * captured on this span's connection. OBI's generic tracer cannot decode the
+   * HPACK-compressed path of connections it did not observe from their first
+   * byte, so non-Go spans can lose the method. The value is an inference and
+   * must render differently from an observed name.
+   */
+  rpcNameInferred?: boolean;
   operationName: string;
   serviceName: string;
   startTime: number;
@@ -91,6 +119,7 @@ export interface Trace {
   traceId: string;
   rootServiceName?: string;
   rootTraceName?: string;
+  rootInferred?: boolean;
   durationMs?: number;
   spanCount?: number;
   spans: Span[];
@@ -101,6 +130,22 @@ export interface LogEntry {
   stream: string;
   labels?: Record<string, string>;
   line: string;
+}
+
+export interface KubernetesEvent {
+  uid: string;
+  namespace: string;
+  name: string;
+  type: string;
+  reason: string;
+  message: string;
+  count: number;
+  firstObservedAt: string;
+  lastObservedAt: string;
+  involvedObjectKind: string;
+  involvedObjectName: string;
+  involvedObjectUid: string;
+  reportingComponent?: string;
 }
 
 export interface PodInfo {

@@ -1,24 +1,17 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
 import { api } from '../../services/api';
 import { ClusterInfo, PodInfo } from '../../types/api';
+import { formatAge } from '../../lib/format';
 import { PodDetailModal } from './PodDetailModal';
-import { MetricCard } from '../common/MetricCard';
 import { StatusBadge } from '../common/StatusBadge';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 import { EmptyState } from '../common/EmptyState';
 import {
   Cpu,
-  Server,
-  Layers,
   Search,
-  Filter,
   RefreshCw,
   Terminal,
-  Activity,
-  AlertTriangle,
-  CheckCircle2,
-  HardDrive,
 } from 'lucide-react';
 
 export const ClusterView: React.FC = () => {
@@ -31,21 +24,35 @@ export const ClusterView: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [selectedPod, setSelectedPod] = useState<PodInfo | null>(null);
 
-  const fetchClusterInfo = async () => {
-    setLoading(true);
+  const requestSeq = useRef(0);
+  const isFirstRender = useRef(true);
+
+  const fetchClusterInfo = async (background = false) => {
+    if (!background) setLoading(true);
     setError(null);
+    const seq = ++requestSeq.current;
     try {
       const data = await api.getClusterInfo();
+      if (seq !== requestSeq.current) return;
       setClusterInfo(data);
     } catch (err: any) {
+      if (seq !== requestSeq.current) return;
       setError(err.message);
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   };
 
+  // Cluster info has no other query inputs: the first refreshCount tick loads
+  // visibly, later ticks refetch in the background.
   useEffect(() => {
-    fetchClusterInfo();
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      fetchClusterInfo();
+      return;
+    }
+    fetchClusterInfo(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshCount]);
 
   const pods = clusterInfo?.pods || [];
@@ -83,34 +90,26 @@ export const ClusterView: React.FC = () => {
   };
 
   return (
-    <div className="p-4 lg:p-8 space-y-6">
-      {/* Metric Cards Row */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <MetricCard
-          title="Cluster Version"
-          value={clusterInfo?.version ? clusterInfo.version.split('+')[0] : 'k3s'}
-          subtitle={clusterInfo?.name || 'Kubernetes'}
-          icon={<Cpu className="w-4 h-4 text-cyan-400" />}
-        />
-        <MetricCard
-          title="Worker Node"
-          value={clusterInfo?.node || 'Local Node'}
-          subtitle={`Status: ${clusterInfo?.status || 'Ready'}`}
-          icon={<Server className="w-4 h-4 text-emerald-400" />}
-        />
-        <MetricCard
-          title="Cluster Pods"
-          value={`${runningPods} / ${pods.length}`}
-          subtitle="Running / Total Pods"
-          icon={<Layers className="w-4 h-4 text-indigo-400" />}
-        />
-        <MetricCard
-          title="Pod Restarts"
-          value={totalRestarts}
-          subtitle={totalRestarts > 0 ? 'Crash or restart detected' : 'Zero pod restarts'}
-          status={totalRestarts > 0 ? 'warning' : 'normal'}
-          icon={<Activity className="w-4 h-4 text-amber-400" />}
-        />
+    <div className="p-4 lg:p-8 space-y-4">
+      {/* Summary strip — cluster identity stays muted; only restarts can alarm */}
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-1 px-4 py-2.5 rounded-md border border-slate-800 bg-slate-900/60 text-xs">
+        <span className="text-slate-400">
+          Pods running
+          <span className={`ml-1.5 font-mono ${runningPods < pods.length ? 'text-amber-400' : 'text-slate-100'}`}>
+            {runningPods}/{pods.length}
+          </span>
+        </span>
+        <span className="text-slate-400">
+          Restarts
+          <span className={`ml-1.5 font-mono ${totalRestarts > 0 ? 'text-amber-400' : 'text-slate-100'}`}>
+            {totalRestarts}
+          </span>
+        </span>
+        {clusterInfo?.version && (
+          <span className="text-slate-500 font-mono text-[11px]">
+            {clusterInfo.version} · {clusterInfo.node || 'local node'}
+          </span>
+        )}
       </div>
 
       {/* Controls Bar: Search & Status Filter */}
@@ -140,7 +139,7 @@ export const ClusterView: React.FC = () => {
           </select>
 
           <button
-            onClick={fetchClusterInfo}
+            onClick={() => fetchClusterInfo()}
             className="p-2 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition"
             title="Refresh Cluster Info"
           >
@@ -151,13 +150,13 @@ export const ClusterView: React.FC = () => {
 
       {/* Pods Table */}
       {loading ? (
-        <LoadingSpinner message="Querying Kubernetes API for cluster & pod status..." size="lg" />
+        <LoadingSpinner message="Loading cluster info…" size="lg" />
       ) : error ? (
         <EmptyState
           title="Cluster Query Failed"
           description={error}
           actionText="Retry"
-          onAction={fetchClusterInfo}
+          onAction={() => fetchClusterInfo()}
         />
       ) : filteredPods.length === 0 ? (
         <EmptyState
@@ -218,7 +217,7 @@ export const ClusterView: React.FC = () => {
                         </span>
                       </td>
                       <td className="p-4 text-right text-slate-400 text-[11px]">
-                        {p.age ? new Date(p.age).toLocaleTimeString() : '-'}
+                        {formatAge(p.age)}
                       </td>
                       <td className="p-4 text-center">
                         <button
