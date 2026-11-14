@@ -115,7 +115,8 @@ type rawSpan struct {
 }
 
 type spanStatus struct {
-	Code string `json:"code"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }
 
 type spanAttr struct {
@@ -124,7 +125,26 @@ type spanAttr struct {
 }
 
 type attrValue struct {
-	StringValue string `json:"stringValue"`
+	StringValue string      `json:"stringValue"`
+	IntValue    interface{} `json:"intValue"`
+	BoolValue   *bool       `json:"boolValue"`
+	DoubleValue *float64    `json:"doubleValue"`
+}
+
+func (v attrValue) String() string {
+	if v.StringValue != "" {
+		return v.StringValue
+	}
+	if v.IntValue != nil {
+		return fmt.Sprintf("%v", v.IntValue)
+	}
+	if v.BoolValue != nil {
+		return fmt.Sprintf("%t", *v.BoolValue)
+	}
+	if v.DoubleValue != nil {
+		return fmt.Sprintf("%v", *v.DoubleValue)
+	}
+	return ""
 }
 
 func NewClient(baseURL string) *Client {
@@ -168,7 +188,7 @@ func isSystemOrHealthSpan(s models.Span) bool {
 	return false
 }
 
-func (c *Client) SearchTraces(ctx context.Context, serviceName string, limit int, startSec, endSec int64) ([]models.Trace, error) {
+func (c *Client) SearchTraces(ctx context.Context, serviceName string, limit int, startSec, endSec int64, status string, minDuration string) ([]models.Trace, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -179,13 +199,39 @@ func (c *Client) SearchTraces(ctx context.Context, serviceName string, limit int
 
 	searchWithQuery := func(minDur string) ([]models.Trace, error) {
 		params := url.Values{}
+		// The plain "status" query parameter is silently ignored by Tempo
+		// (verified 2026-11-11 against 3.x: identical trace ids for
+		// status=error/ok/unset). TraceQL is the only filter that actually
+		// selects failing traces, so use it when a status is requested.
+		// For eBPF/OBI spans, errors may be recorded in span attributes (e.g.
+		// http.status_code >= 500, rpc.grpc.status_code != 0) without setting
+		// top-level status code to error; the TraceQL query checks both.
+		// Build TraceQL expression.
+		// TraceQL is Tempo's native query engine: it handles exact resource attribute scoping,
+		// duration comparisons (span duration and trace duration), and status filters.
+		var conditions []string
 		if serviceName != "" {
-			params.Set("tags", fmt.Sprintf("service.name=%s", serviceName))
+			// Match server spans on the service OR caller spans explicitly targeting the service (e.g. frontend -> currencyservice)
+			serviceFilter := fmt.Sprintf(`(resource.service.name = %q || span.peer.service = %q || span.server.address =~ "(?i)%s.*")`,
+				serviceName, serviceName, regexp.QuoteMeta(serviceName))
+			conditions = append(conditions, serviceFilter)
+		}
+
+		if status == "error" {
+			errorFilter := `(status = error || span.status_code = error || span.http.status_code >= 500 || span.http.response.status_code >= 500 || span.rpc.grpc.status_code != 0 || span.rpc.grpc.status_code != "0" || span.rpc.grpc.status_code != "OK" || span.rpc.status_code != "OK" || span.rpc.status_code != 0 || span.rpc.response.status_code != "OK" || span.rpc.response.status_code != 0 || span.error = true)`
+			conditions = append(conditions, errorFilter)
+		} else if status != "" {
+			conditions = append(conditions, fmt.Sprintf(`status = %s`, status))
+		}
+
+		if minDur != "" {
+			conditions = append(conditions, fmt.Sprintf(`(duration >= %s || trace:duration >= %s)`, minDur, minDur))
+		}
+
+		if len(conditions) > 0 {
+			params.Set("q", fmt.Sprintf(`{ %s }`, strings.Join(conditions, " && ")))
 		}
 		params.Set("limit", strconv.Itoa(fetchLimit))
-		if minDur != "" {
-			params.Set("minDuration", minDur)
-		}
 		// Explicit window so the header's time-range control governs trace
 		// search the same way it governs metrics and logs. 0 means "let
 		// Tempo apply its own default".
@@ -194,25 +240,55 @@ func (c *Client) SearchTraces(ctx context.Context, serviceName string, limit int
 			params.Set("end", strconv.FormatInt(endSec, 10))
 		}
 
-		u := fmt.Sprintf("%s/api/search?%s", c.baseURL, params.Encode())
-		req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+		executeSearch := func(p url.Values) (*searchResponse, error) {
+			u := fmt.Sprintf("%s/api/search?%s", c.baseURL, p.Encode())
+			req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+			if err != nil {
+				return nil, err
+			}
+			resp, err := c.client.Do(req)
+			if err != nil {
+				return nil, fmt.Errorf("tempo search failed: %w", err)
+			}
+			defer resp.Body.Close()
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, err
+			}
+			if resp.StatusCode != http.StatusOK {
+				return nil, fmt.Errorf("tempo search status %d: %s", resp.StatusCode, string(body))
+			}
+
+			var searchResp searchResponse
+			if err := json.Unmarshal(body, &searchResp); err != nil {
+				return nil, fmt.Errorf("failed to parse tempo response: %w", err)
+			}
+			return &searchResp, nil
+		}
+
+		searchResp, err := executeSearch(params)
+		if err != nil && params.Get("q") != "" {
+			// Fallback: If TraceQL syntax failed, try legacy tag search
+			fallbackParams := url.Values{}
+			if serviceName != "" {
+				fallbackParams.Set("tags", fmt.Sprintf("service.name=%s", serviceName))
+			}
+			fallbackParams.Set("limit", strconv.Itoa(fetchLimit))
+			if minDur != "" {
+				fallbackParams.Set("minDuration", minDur)
+			}
+			if startSec > 0 && endSec > startSec {
+				fallbackParams.Set("start", strconv.FormatInt(startSec, 10))
+				fallbackParams.Set("end", strconv.FormatInt(endSec, 10))
+			}
+			if fbResp, fbErr := executeSearch(fallbackParams); fbErr == nil {
+				searchResp = fbResp
+				err = nil
+			}
+		}
 		if err != nil {
 			return nil, err
-		}
-		resp, err := c.client.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("tempo search failed: %w", err)
-		}
-		defer resp.Body.Close()
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, err
-		}
-
-		var searchResp searchResponse
-		if err := json.Unmarshal(body, &searchResp); err != nil {
-			return nil, fmt.Errorf("failed to parse tempo response: %w", err)
 		}
 
 		candidates := make([]tempoTrace, 0, len(searchResp.Traces))
@@ -269,7 +345,7 @@ func (c *Client) SearchTraces(ctx context.Context, serviceName string, limit int
 				if len(cleanSpans) == 0 {
 					continue
 				}
-				// Beyla can omit parent links on multiplexed HTTP/2 and gRPC
+				// OBI can omit parent links on multiplexed HTTP/2 and gRPC
 				// connections. In that partial tree, the first parentless span in
 				// Tempo's response is not necessarily the transaction entry point.
 				// Use the earliest visible span for the display label and mark the
@@ -328,14 +404,17 @@ func (c *Client) SearchTraces(ctx context.Context, serviceName string, limit int
 		return traces, nil
 	}
 
-	// 1. Query genuine transactions with duration >= 2ms (excludes sub-ms
-	//    kubelet probes). This is the set we want.
+	// When the caller explicitly requests a minimum duration (e.g. "100ms"
+	// from "Slow traces"), query that threshold directly without probe fallback.
+	if minDuration != "" {
+		return searchWithQuery(minDuration)
+	}
+
+	// 1. Default: query genuine transactions with duration >= 2ms (excludes
+	//    sub-ms kubelet probes).
 	res, err := searchWithQuery("2ms")
 
 	// 2. Query without minDuration only when the first query produced NOTHING.
-	//    Previously a larger fallback set silently replaced a shorter fresh set,
-	//    which made the list jump between ~30s-old and ~2-4min-old traces on
-	//    every refresh. A smaller fresh list is better than a larger stale one.
 	var fallbackRes []models.Trace
 	var fallbackErr error
 	if err != nil || len(res) == 0 {
@@ -446,6 +525,17 @@ func (c *Client) GetTrace(ctx context.Context, traceID string) ([]models.Span, e
 	var spans []models.Span
 	for _, batch := range traceResp.Batches {
 		serviceName := extractServiceName(batch.Resource.Attributes)
+		podName := resourceAttr(batch.Resource.Attributes, "k8s.pod.name")
+		if podName == "" {
+			podName = resourceAttr(batch.Resource.Attributes, "service.instance.id")
+		}
+		nodeName := resourceAttr(batch.Resource.Attributes, "k8s.node.name")
+		if nodeName == "" {
+			nodeName = resourceAttr(batch.Resource.Attributes, "host.name")
+		}
+		containerName := resourceAttr(batch.Resource.Attributes, "k8s.container.name")
+		processPID := resourceAttr(batch.Resource.Attributes, "process.pid")
+
 		for _, scope := range batch.ScopeSpans {
 			for _, raw := range scope.Spans {
 				startNano, _ := strconv.ParseInt(raw.StartTimeUnixNano, 10, 64)
@@ -458,7 +548,19 @@ func (c *Client) GetTrace(ctx context.Context, traceID string) ([]models.Span, e
 
 				attrs := make(map[string]string)
 				for _, a := range raw.Attributes {
-					attrs[a.Key] = a.Value.StringValue
+					attrs[a.Key] = a.Value.String()
+				}
+				if podName != "" {
+					attrs["k8s.pod.name"] = podName
+				}
+				if nodeName != "" {
+					attrs["k8s.node.name"] = nodeName
+				}
+				if containerName != "" {
+					attrs["k8s.container.name"] = containerName
+				}
+				if processPID != "" {
+					attrs["process.pid"] = processPID
 				}
 
 				opName := raw.Name
@@ -490,6 +592,26 @@ func (c *Client) GetTrace(ctx context.Context, traceID string) ([]models.Span, e
 				}
 
 				kind := normalizeSpanKind(raw.Kind)
+				statusCode := raw.Status.Code
+				if statusCode == "" || statusCode == "0" || statusCode == "STATUS_CODE_UNSET" {
+					if codeStr := attrs["http.response.status_code"]; codeStr != "" {
+						if c, err := strconv.Atoi(codeStr); err == nil && c >= 500 {
+							statusCode = "STATUS_CODE_ERROR"
+						}
+					} else if codeStr := attrs["http.status_code"]; codeStr != "" {
+						if c, err := strconv.Atoi(codeStr); err == nil && c >= 500 {
+							statusCode = "STATUS_CODE_ERROR"
+						}
+					} else if grpcCode := attrs["rpc.grpc.status_code"]; grpcCode != "" && grpcCode != "0" && grpcCode != "OK" {
+						statusCode = "STATUS_CODE_ERROR"
+					} else if rpcCode := attrs["rpc.status_code"]; rpcCode != "" && rpcCode != "0" && rpcCode != "OK" {
+						statusCode = "STATUS_CODE_ERROR"
+					} else if respRpcCode := attrs["rpc.response.status_code"]; respRpcCode != "" && respRpcCode != "0" && respRpcCode != "OK" {
+						statusCode = "STATUS_CODE_ERROR"
+					} else if attrs["error"] == "true" || attrs["error.type"] != "" {
+						statusCode = "STATUS_CODE_ERROR"
+					}
+				}
 				span := models.Span{
 					TraceID:       raw.TraceID,
 					SpanID:        raw.SpanID,
@@ -499,7 +621,10 @@ func (c *Client) GetTrace(ctx context.Context, traceID string) ([]models.Span, e
 					ServiceName:   serviceName,
 					StartTime:     startNano,
 					Duration:      durNano,
-					StatusCode:    raw.Status.Code,
+					StatusCode:    statusCode,
+					StatusMessage: raw.Status.Message,
+					PodName:       podName,
+					NodeName:      nodeName,
 					Attributes:    attrs,
 				}
 				if lang := strings.TrimSpace(resourceAttr(batch.Resource.Attributes, "telemetry.sdk.language")); lang != "" && serviceName != "" {
@@ -582,7 +707,7 @@ func cloneSpans(spans []models.Span) []models.Span {
 }
 
 // reparentOrphanSpans repairs the known eBPF-collection limitation on
-// long-lived multiplexed HTTP/2/gRPC connections: Beyla's context tracking is
+// long-lived multiplexed HTTP/2/gRPC connections: OBI's context tracking is
 // per CONNECTION, so on multiplexed streams a CLIENT span is exported without
 // the in-process call-site span that issued it. The missing parent is always
 // the CALLER's own next-level span. Two orphan shapes appear in Tempo data
@@ -668,7 +793,7 @@ func normalizeSpanKind(kind string) string {
 
 // isGenericRPCName reports whether a span name is an exporter placeholder
 // rather than a real operation ("grpc" from OBI's unmatched-route heuristic,
-// "*" from Beyla, "_OTHER" from the semconv unknown-value convention).
+// "*" from older builds, "_OTHER" from the semconv unknown-value convention).
 func isGenericRPCName(name string) bool {
 	return name == "grpc" || name == "*" || name == "_OTHER"
 }
@@ -901,7 +1026,7 @@ func (c *Client) ServiceLanguages() map[string]string {
 func resourceAttr(attrs []spanAttr, key string) string {
 	for _, a := range attrs {
 		if a.Key == key {
-			return a.Value.StringValue
+			return a.Value.String()
 		}
 	}
 	return ""
@@ -916,20 +1041,8 @@ const languageWarmInterval = 2 * time.Minute
 // returns immediately, so callers may invoke it on every dashboard refresh.
 // Runs inline (typically <1s: one search plus up to 8 cached trace fetches);
 // call it from a goroutine to keep request latency unchanged.
-// languageTraceStartUnixNano parses the start time of a Tempo search result.
-// Local to the language warm-up so the feature does not depend on the
-// trace-listing helpers.
-func languageTraceStartUnixNano(t tempoTrace) int64 {
-	if t.StartTimeUnixNano == "" {
-		return 0
-	}
-	v, err := strconv.ParseInt(t.StartTimeUnixNano, 10, 64)
-	if err != nil {
-		return 0
-	}
-	return v
-}
-
+// Diverse sample: one trace per distinct root service so a single chatty
+// root (loadgenerator) cannot monopolise the batch limit.
 func (c *Client) WarmServiceLanguages(ctx context.Context) {
 	c.langsMu.Lock()
 	if c.warming || time.Since(c.warmAt) < languageWarmInterval {
@@ -973,7 +1086,7 @@ func (c *Client) WarmServiceLanguages(ctx context.Context) {
 		candidates = append(candidates, t)
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
-		return languageTraceStartUnixNano(candidates[i]) > languageTraceStartUnixNano(candidates[j])
+		return candidateStartUnixNano(candidates[i]) > candidateStartUnixNano(candidates[j])
 	})
 
 	// Diverse sample: one trace per distinct root service so a single chatty

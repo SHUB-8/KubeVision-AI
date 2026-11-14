@@ -54,7 +54,7 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 	}
 
 	// 1. HTTP request rate from Prometheus (server or client calling this service)
-	if rateData, err := h.promClient.GetEndpointMetrics(namespace, name, window); err == nil {
+	if rateData, err := h.promClient.GetEndpointMetrics(c.Request.Context(), namespace, name, window); err == nil {
 		for _, r := range parseMetricEntries(rateData) {
 			ep := getEndpoint(r)
 			ep.Rate += entryValue(r)
@@ -65,7 +65,7 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 	}
 
 	// 2. gRPC call rate from Prometheus (server or client calling this service)
-	if data, err := h.promClient.GetEndpointRPCMetrics(namespace, name, window); err == nil {
+	if data, err := h.promClient.GetEndpointRPCMetrics(c.Request.Context(), namespace, name, window); err == nil {
 		for _, r := range parseMetricEntries(data) {
 			ep := getEndpoint(r)
 			ep.Rate += entryValue(r)
@@ -76,14 +76,14 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 	}
 
 	// 3. Error rates
-	if data, err := h.promClient.GetEndpointErrors(namespace, name, window); err == nil {
+	if data, err := h.promClient.GetEndpointErrors(c.Request.Context(), namespace, name, window); err == nil {
 		for _, r := range parseMetricEntries(data) {
 			ep := getEndpoint(r)
 			ep.ErrorRate = entryValue(r)
 			ep.ErrorRateSource = models.SourceMetrics
 		}
 	}
-	if data, err := h.promClient.GetEndpointRPCErrors(namespace, name, window); err == nil {
+	if data, err := h.promClient.GetEndpointRPCErrors(c.Request.Context(), namespace, name, window); err == nil {
 		for _, r := range parseMetricEntries(data) {
 			ep := getEndpoint(r)
 			ep.ErrorRate += entryValue(r)
@@ -94,7 +94,7 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 	// 3b. Datastore operations (Redis RESP, SQL, Mongo) as observed by the
 	// callers targeting this datastore. All values are client-observed: the
 	// db_server histogram mis-pairs operations on persistent connections.
-	if rateData, err := h.promClient.GetEndpointDBMetrics(namespace, name, window); err == nil {
+	if rateData, err := h.promClient.GetEndpointDBMetrics(c.Request.Context(), namespace, name, window); err == nil {
 		for _, r := range parseMetricEntries(rateData) {
 			ep := getEndpoint(r)
 			ep.Rate += entryValue(r)
@@ -103,7 +103,7 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 			}
 		}
 	}
-	if data, err := h.promClient.GetEndpointDBErrors(namespace, name, window); err == nil {
+	if data, err := h.promClient.GetEndpointDBErrors(c.Request.Context(), namespace, name, window); err == nil {
 		for _, r := range parseMetricEntries(data) {
 			ep := getEndpoint(r)
 			if v := entryValue(r); v > 0 {
@@ -124,7 +124,7 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 		{"0.99", func(ep *models.Endpoint) float64 { return ep.LatencyP99 }, func(ep *models.Endpoint, v float64) { ep.LatencyP99 = v }},
 	}
 	for _, q := range quantiles {
-		if data, err := h.promClient.GetEndpointLatency(namespace, name, window, q.q); err == nil {
+		if data, err := h.promClient.GetEndpointLatency(c.Request.Context(), namespace, name, window, q.q); err == nil {
 			for _, r := range parseMetricEntries(data) {
 				ep := getEndpoint(r)
 				if v := entryValue(r); v > 0 {
@@ -133,7 +133,7 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 				}
 			}
 		}
-		if data, err := h.promClient.GetEndpointRPCLatency(namespace, name, window, q.q); err == nil {
+		if data, err := h.promClient.GetEndpointRPCLatency(c.Request.Context(), namespace, name, window, q.q); err == nil {
 			for _, r := range parseMetricEntries(data) {
 				ep := getEndpoint(r)
 				if q.get(ep) == 0 {
@@ -144,7 +144,7 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 				}
 			}
 		}
-		if data, err := h.promClient.GetEndpointDBLatency(namespace, name, window, q.q); err == nil {
+		if data, err := h.promClient.GetEndpointDBLatency(c.Request.Context(), namespace, name, window, q.q); err == nil {
 			for _, r := range parseMetricEntries(data) {
 				ep := getEndpoint(r)
 				if q.get(ep) == 0 {
@@ -169,7 +169,7 @@ func (h *Handlers) GetServiceEndpoints(c *gin.Context) {
 
 	// 6. If no active traffic observed in window, dynamically query Kubernetes service ports
 	if len(endpoints) == 0 && h.k8sClient != nil {
-		if declared, err := h.k8sClient.GetDeclaredServiceEndpoints(namespace, name); err == nil && len(declared) > 0 {
+		if declared, err := h.k8sClient.GetDeclaredServiceEndpoints(c.Request.Context(), namespace, name); err == nil && len(declared) > 0 {
 			endpoints = declared
 		} else if err != nil {
 			slog.Warn("endpoint response could not load Kubernetes Service ports", "namespace", namespace, "service", name, "error", err)

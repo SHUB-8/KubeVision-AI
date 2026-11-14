@@ -5,7 +5,7 @@ package models
 // sampled spans and a histogram_quantile over every request on the wire are
 // not the same evidence, and must not look identical on screen.
 const (
-	// SourceMetrics - measured by eBPF/Beyla, scraped from Prometheus.
+	// SourceMetrics - measured by eBPF/OBI, scraped from Prometheus.
 	SourceMetrics = "metrics"
 	// SourceClientObserved - measured on the CALLER side of an interaction and
 	// attributed to the target (e.g. a datastore's latency taken from the
@@ -21,22 +21,20 @@ const (
 )
 
 type Node struct {
-	ID         string  `json:"id"`
-	Label      string  `json:"label"`
-	Type       string  `json:"type"`
-	Namespace  string  `json:"namespace"`
-	Protocol   string  `json:"protocol,omitempty"`
+	ID        string `json:"id"`
+	Label     string `json:"label"`
+	Type      string `json:"type"`
+	Namespace string `json:"namespace"`
+	Protocol  string `json:"protocol,omitempty"`
 	// Language is the runtime OBI or the service's own SDK reported via the
 	// telemetry.sdk.language attribute ("go", "java", "nodejs", ...). Observed
 	// telemetry only: never inferred from an image name or a port number, and
 	// empty for external / cross-namespace nodes that have no local process.
 	Language   string  `json:"language,omitempty"`
-	Rate       float64 `json:"rate,omitempty"`
-	ErrorRate  float64 `json:"errorRate,omitempty"`
-	LatencyP95 float64 `json:"latencyP95,omitempty"`
-	// RateSource / LatencySource are empty when the value is absent (no data),
-	// which is distinct from a measured zero. The frontend renders "no data"
-	// for an absent value rather than "0 req/s / 0 ms".
+	Rate          float64           `json:"rate,omitempty"`
+	ErrorRate     float64           `json:"errorRate,omitempty"`
+	LatencyP95    float64           `json:"latencyP95,omitempty"`
+	BytesRate     float64           `json:"bytesRate,omitempty"`
 	RateSource    string            `json:"rateSource,omitempty"`
 	LatencySource string            `json:"latencySource,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
@@ -50,6 +48,7 @@ type Edge struct {
 	Rate          float64 `json:"rate,omitempty"`
 	ErrorRate     float64 `json:"errorRate,omitempty"`
 	LatencyP95    float64 `json:"latencyP95,omitempty"`
+	BytesRate     float64 `json:"bytesRate,omitempty"`
 	RateSource    string  `json:"rateSource,omitempty"`
 	LatencySource string  `json:"latencySource,omitempty"`
 }
@@ -70,7 +69,7 @@ type Service struct {
 	// telemetry.sdk.language resource attribute ("go", "java", "nodejs", ...).
 	// Empty when the service has not produced any trace yet.
 	Language string `json:"language,omitempty"`
-	// RED metrics sourced from Beyla via Prometheus or borrowed from a topology
+	// RED metrics sourced from OBI via Prometheus or borrowed from a topology
 	// edge. Zero when there was no measurement in the requested window.
 	Rate          float64 `json:"rate"`
 	ErrorRate     float64 `json:"errorRate"`
@@ -103,7 +102,7 @@ type Span struct {
 	// "producer", "consumer"); empty when the exporter did not set one.
 	Kind string `json:"kind,omitempty"`
 	// ParentInferred is set when the original parent span was never exported
-	// (the known Beyla limitation on long-lived multiplexed HTTP/2/gRPC
+	// (the known OBI limitation on long-lived multiplexed HTTP/2/gRPC
 	// connections) and this backend re-attached the span to the serving span
 	// of its target service using time + target adjacency. The UI must render
 	// such links differently from observed ones.
@@ -122,6 +121,12 @@ type Span struct {
 	StartTime       int64             `json:"startTime"`
 	Duration        int64             `json:"duration"`
 	StatusCode      string            `json:"statusCode"`
+	// StatusMessage is the span's recorded failure reason (OTLP status.message).
+	// For an RPC error this is often the only place the cause is written down:
+	// a failing callee may log it to stderr while the caller logs nothing.
+	StatusMessage   string            `json:"statusMessage,omitempty"`
+	PodName         string            `json:"podName,omitempty"`
+	NodeName        string            `json:"nodeName,omitempty"`
 	Attributes      map[string]string `json:"attributes,omitempty"`
 }
 
@@ -133,6 +138,22 @@ type Trace struct {
 	DurationMs      int64  `json:"durationMs,omitempty"`
 	SpanCount       int    `json:"spanCount,omitempty"`
 	Spans           []Span `json:"spans"`
+}
+
+// TraceLogEntry is a log line attributed to the service that emitted it.
+type TraceLogEntry struct {
+	LogEntry
+	Service string `json:"service,omitempty"`
+}
+
+// TraceLogs are the log lines every service participating in a trace emitted
+// around that trace's time window.
+type TraceLogs struct {
+	TraceID  string          `json:"traceId"`
+	Services []string        `json:"services"`
+	StartNS  int64           `json:"startNs"`
+	EndNS    int64           `json:"endNs"`
+	Entries  []TraceLogEntry `json:"entries"`
 }
 
 type LogEntry struct {
@@ -159,20 +180,46 @@ type KubernetesEvent struct {
 }
 
 type PodInfo struct {
-	Name         string `json:"name"`
-	Namespace    string `json:"namespace"`
-	Status       string `json:"status"`
-	Node         string `json:"node"`
-	IP           string `json:"ip"`
-	Restart      int32  `json:"restarts"`
-	Age          string `json:"age"`
-	WorkloadName string `json:"workloadName,omitempty"`
+	Name             string  `json:"name"`
+	Namespace        string  `json:"namespace"`
+	Status           string  `json:"status"`
+	Node             string  `json:"node"`
+	IP               string  `json:"ip"`
+	Restart          int32   `json:"restarts"`
+	Age              string  `json:"age"`
+	WorkloadName     string  `json:"workloadName,omitempty"`
+	CPUUsageCores    float64 `json:"cpuUsageCores,omitempty"`
+	CPULimitCores    float64 `json:"cpuLimitCores,omitempty"`
+	MemoryUsageBytes float64 `json:"memoryUsageBytes,omitempty"`
+	MemoryLimitBytes float64 `json:"memoryLimitBytes,omitempty"`
+}
+
+type PVCInfo struct {
+	Name         string   `json:"name"`
+	Namespace    string   `json:"namespace"`
+	Status       string   `json:"status"` // Bound, Pending, Lost
+	VolumeName   string   `json:"volumeName,omitempty"`
+	Capacity     string   `json:"capacity,omitempty"`
+	StorageClass string   `json:"storageClass,omitempty"`
+	AccessModes  []string `json:"accessModes,omitempty"`
+	Age          string   `json:"age,omitempty"`
 }
 
 type ClusterInfo struct {
-	Name    string    `json:"name"`
-	Version string    `json:"version"`
-	Node    string    `json:"node"`
-	Status  string    `json:"status"`
-	Pods    []PodInfo `json:"pods,omitempty"`
+	Name             string    `json:"name"`
+	Version          string    `json:"version"`
+	Node             string    `json:"node"`
+	Status           string    `json:"status"`
+	Pods             []PodInfo `json:"pods,omitempty"`
+	PVCs             []PVCInfo `json:"pvcs,omitempty"`
+	CPUUsageCores    float64   `json:"cpuUsageCores,omitempty"`
+	CPUTotalCores    float64   `json:"cpuTotalCores,omitempty"`
+	MemoryUsageBytes float64   `json:"memoryUsageBytes,omitempty"`
+	MemoryTotalBytes float64   `json:"memoryTotalBytes,omitempty"`
+}
+
+type LogVolumeBucket struct {
+	Timestamp int64 `json:"timestamp"` // Unix seconds
+	Total     int64 `json:"total"`
+	Errors    int64 `json:"errors"`
 }

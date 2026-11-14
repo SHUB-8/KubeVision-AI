@@ -19,6 +19,13 @@ spec:
           # CVE-2026-56857/56866/78659/78660/78663/78667/78669/94439/94440/
           # 94448/97030-97032/111943). Config is unchanged.
           image: grafana/tempo:3.1.1
+          resources:
+            requests:
+              cpu: 200m
+              memory: 500Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
           args:
             - "-config.file=/etc/tempo/tempo.yaml"
           readinessProbe:

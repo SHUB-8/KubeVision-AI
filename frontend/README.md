@@ -1,32 +1,39 @@
-# React + TypeScript + Vite
+# KubeVision AI — Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React 19 + TypeScript + Vite 8 + Tailwind 4 dashboard for the KubeVision AI hub.
 
-Currently, two official plugins are available:
+## Run
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+The normal path is from the repo root — the scripts build this app and let the Go hub serve it:
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+./scripts/all.sh          # build UI + backend, serve on http://localhost:8090
+./scripts/all.sh --dev    # Vite hot-reload on http://localhost:5173
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Standalone (expects the API on `localhost:8090`; override with `VITE_API_TARGET`):
+
+```bash
+npm ci
+npm run dev     # vite dev server on :5173, proxies /api
+npm run build   # tsc -b && vite build -> dist/
+npm run lint    # oxlint
+```
+
+## Layout
+
+| Path | What |
+|---|---|
+| `src/components/<feature>/` | One folder per view: topology, services, traces, logs, events, cluster, incidents, settings |
+| `src/components/common/`, `layout/` | Shared primitives and the app shell (header, nav, toasts) |
+| `src/services/api.ts` | The only module that speaks HTTP |
+| `src/context/AppContext.tsx` | Shell state: tab, namespace, window, refresh, toasts |
+| `src/types/api.ts` | TypeScript mirror of the backend contract |
+| `src/lib/` | Pure helpers (formatting, trace maths) |
+
+Design system: [`design.md`](design.md) plus the tokens in `src/index.css`.
+
+## Status
+
+The Incidents / RCA view is a placeholder; the ML detection and RCA pipeline is planned, not
+implemented. See `PRD.md` at the repo root for the target product.

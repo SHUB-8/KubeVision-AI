@@ -23,7 +23,7 @@ type RouteConfig struct {
 	AllowedOrigins     []string
 }
 
-func SetupRoutes(store *storage.Store, k8sClient *k8s.Client, promClient *prometheus.Client,
+func SetupRoutes(ctx context.Context, store *storage.Store, k8sClient *k8s.Client, promClient *prometheus.Client,
 	lokiClient *loki.Client, tempoClient *tempo.Client, config RouteConfig) *gin.Engine {
 
 	gin.SetMode(gin.ReleaseMode)
@@ -39,7 +39,11 @@ func SetupRoutes(store *storage.Store, k8sClient *k8s.Client, promClient *promet
 	handlers := NewHandlers(store, k8sClient, promClient, lokiClient, tempoClient, config.DefaultNamespace, config.ObservedNamespaces)
 	// Baselines are stored only when calculated; without this every Baselines
 	// view is empty after a backend restart until someone clicks recalculate.
-	handlers.StartBaselineAutoRecalc(context.Background(), 5*time.Minute)
+	recalcCtx := ctx
+	if recalcCtx == nil {
+		recalcCtx = context.Background()
+	}
+	handlers.StartBaselineAutoRecalc(recalcCtx, 5*time.Minute)
 
 	api := router.Group("/api/v1")
 	api.Use(mutationAuth(config.APIToken))
@@ -51,8 +55,10 @@ func SetupRoutes(store *storage.Store, k8sClient *k8s.Client, promClient *promet
 		api.GET("/services/:name/baselines", handlers.GetBaselines)
 		api.POST("/baselines/recalculate", handlers.RecalculateBaselines)
 		api.GET("/traces/:trace_id", handlers.GetTraces)
+		api.GET("/traces/:trace_id/logs", handlers.GetTraceLogs)
 		api.GET("/traces", handlers.SearchTraces)
 		api.GET("/logs", handlers.GetLogs)
+		api.GET("/logs/volume", handlers.GetLogVolume)
 		api.GET("/config", handlers.GetConfig)
 		api.PUT("/config", handlers.UpdateConfig)
 		api.GET("/cluster", handlers.GetClusterInfo)
@@ -75,6 +81,11 @@ func corsMiddleware(origins []string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		origin := c.Request.Header.Get("Origin")
 		_, originAllowed := allowed[origin]
+		if len(allowed) == 0 && origin != "" {
+			if isLocalhostOrigin(origin) {
+				originAllowed = true
+			}
+		}
 		if origin != "" && originAllowed {
 			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
 			c.Writer.Header().Add("Vary", "Origin")
@@ -92,6 +103,15 @@ func corsMiddleware(origins []string) gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+func isLocalhostOrigin(origin string) bool {
+	return strings.HasPrefix(origin, "http://localhost:") ||
+		strings.HasPrefix(origin, "https://localhost:") ||
+		strings.HasPrefix(origin, "http://127.0.0.1:") ||
+		strings.HasPrefix(origin, "https://127.0.0.1:") ||
+		origin == "http://localhost" ||
+		origin == "http://127.0.0.1"
 }
 
 func mutationAuth(token string) gin.HandlerFunc {

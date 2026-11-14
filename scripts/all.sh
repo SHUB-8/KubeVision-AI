@@ -224,10 +224,27 @@ stop_k3s() {
 STACK_NS="monitoring"
 STACK_STS="loki prometheus-prometheus-kube-prometheus-prometheus"
 STACK_DEPLOY="tempo prometheus-kube-state-metrics"
-STACK_DS="beyla fluent-bit"
+STACK_DS="obi fluent-bit"
 
 stack_reachable() {
   kubectl get ns "$STACK_NS" >/dev/null 2>&1
+}
+
+cleanup_legacy_beyla() {
+  # The collector shipped under the name "beyla" until the OBI rename. OBI is a
+  # different binary, so applying the OBI manifests does NOT replace the legacy
+  # DaemonSet: both would run (double eBPF collection, competing BPF maps).
+  # Remove the legacy objects once, idempotently, while they still exist.
+  local ns="${1:-monitoring}"
+  kubectl -n "$ns" get ds beyla >/dev/null 2>&1 || return 0
+  log_warn "Legacy 'beyla' collector found in ns/$ns; removing it (superseded by 'obi')."
+  kubectl -n "$ns" delete ds beyla --ignore-not-found 2>/dev/null || true
+  kubectl -n "$ns" delete svc beyla --ignore-not-found 2>/dev/null || true
+  kubectl -n "$ns" delete cm beyla-config --ignore-not-found 2>/dev/null || true
+  kubectl -n "$ns" delete sa beyla --ignore-not-found 2>/dev/null || true
+  kubectl -n "$ns" delete servicemonitor beyla --ignore-not-found 2>/dev/null || true
+  kubectl delete clusterrole beyla --ignore-not-found 2>/dev/null || true
+  kubectl delete clusterrolebinding beyla --ignore-not-found 2>/dev/null || true
 }
 
 pause_stack() {
@@ -265,17 +282,19 @@ resume_stack() {
     return 0
   fi
 
-  log_info "Re-applying Tempo + Beyla manifests..."
+  cleanup_legacy_beyla "$STACK_NS"
+
+  log_info "Re-applying Tempo + OBI manifests..."
   kubectl apply -f deploy/k8s/collection/tempo-configmap.yaml \
                 -f deploy/k8s/collection/tempo-deployment.yaml \
                 -f deploy/k8s/collection/tempo-service.yaml
-  kubectl apply -f deploy/k8s/collection/beyla-serviceaccount.yaml \
-                -f deploy/k8s/collection/beyla-clusterrole.yaml \
-                -f deploy/k8s/collection/beyla-clusterrolebinding.yaml \
-                -f deploy/k8s/collection/beyla-configmap.yaml \
-                -f deploy/k8s/collection/beyla-service.yaml \
-                -f deploy/k8s/collection/beyla-servicemonitor.yaml \
-                -f deploy/k8s/collection/beyla-daemonset.yaml
+  kubectl apply -f deploy/k8s/collection/obi-serviceaccount.yaml \
+                -f deploy/k8s/collection/obi-clusterrole.yaml \
+                -f deploy/k8s/collection/obi-clusterrolebinding.yaml \
+                -f deploy/k8s/collection/obi-configmap.yaml \
+                -f deploy/k8s/collection/obi-service.yaml \
+                -f deploy/k8s/collection/obi-servicemonitor.yaml \
+                -f deploy/k8s/collection/obi-daemonset.yaml
 
   log_info "Scaling stores back up..."
   local sts dep
@@ -298,7 +317,7 @@ resume_stack() {
   kubectl -n "$STACK_NS" rollout status sts/prometheus-prometheus-kube-prometheus-prometheus --timeout=180s
   kubectl -n "$STACK_NS" rollout status deploy/tempo --timeout=180s
   kubectl -n "$STACK_NS" rollout status ds/fluent-bit --timeout=180s || true
-  kubectl -n "$STACK_NS" rollout status ds/beyla --timeout=180s
+  kubectl -n "$STACK_NS" rollout status ds/obi --timeout=180s
   log_success "Stack resumed."
 }
 
@@ -379,7 +398,7 @@ purge_stack() {
   else
     echo -e "${YELLOW}${BOLD}WARNING: this permanently deletes:${NC}"
     echo "  - all Prometheus metrics, Loki logs and Tempo traces"
-    echo "  - the '$STACK_NS' namespace and every workload in it (Beyla, Fluent Bit, ...)"
+    echo "  - the '$STACK_NS' namespace and every workload in it (OBI, Fluent Bit, ...)"
     echo "  - all PVCs (storage-loki-0, ...) and the k3s local-path directories on this node"
     echo ""
     read -rp "Are you sure you want to proceed? [y/N]: " confirm
@@ -419,13 +438,15 @@ purge_stack() {
     fi
   fi
 
+  cleanup_legacy_beyla "$STACK_NS"
+
   log_info "4/7 Deleting raw collection manifests & RBAC..."
   local f
-  for f in deploy/k8s/collection/beyla-*.yaml deploy/k8s/collection/tempo-*.yaml; do
+  for f in deploy/k8s/collection/obi-*.yaml deploy/k8s/collection/tempo-*.yaml; do
     kubectl delete -f "$f" --ignore-not-found 2>/dev/null || true
   done
-  kubectl delete clusterrole beyla --ignore-not-found 2>/dev/null || true
-  kubectl delete clusterrolebinding beyla --ignore-not-found 2>/dev/null || true
+  kubectl delete clusterrole obi --ignore-not-found 2>/dev/null || true
+  kubectl delete clusterrolebinding obi --ignore-not-found 2>/dev/null || true
 
   log_info "5/7 Deleting all PVCs in ns/$STACK_NS..."
   if kubectl get ns "$STACK_NS" >/dev/null 2>&1; then
@@ -491,8 +512,8 @@ ensure_and_wait_pods() {
     kubectl -n "$STACK_NS" rollout status sts/prometheus-prometheus-kube-prometheus-prometheus --timeout=180s
     kubectl -n "$STACK_NS" get ds fluent-bit >/dev/null 2>&1 && \
       kubectl -n "$STACK_NS" rollout status ds/fluent-bit --timeout=120s || true
-    kubectl -n "$STACK_NS" get ds beyla >/dev/null 2>&1 && \
-      kubectl -n "$STACK_NS" rollout status ds/beyla --timeout=120s || true
+    kubectl -n "$STACK_NS" get ds obi >/dev/null 2>&1 && \
+      kubectl -n "$STACK_NS" rollout status ds/obi --timeout=120s || true
     log_success "Monitoring stack is ready."
   else
     log_warn "Namespace 'monitoring' not found. Run ./scripts/setup.sh stack to deploy it."

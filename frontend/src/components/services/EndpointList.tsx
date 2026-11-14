@@ -56,34 +56,34 @@ export const EndpointList: React.FC<EndpointListProps> = ({ endpoints, loading }
                   {ep.rate > 0 ? (
                     `${ep.rate.toFixed(2)}/s`
                   ) : (
-                    <span className="text-slate-500">not measured</span>
+                    <span className="text-slate-400">not measured</span>
                   )}
                 </td>
-                <td className={`p-3 text-right font-semibold ${ep.rate > 0 ? (hasErrors ? 'text-rose-400' : 'text-slate-400') : 'text-slate-500'}`}>
+                <td className={`p-3 text-right font-semibold ${ep.rate > 0 && hasErrors ? 'text-rose-400' : 'text-slate-400'}`}>
                   {ep.rate > 0 ? `${(ep.errorRate * 100).toFixed(1)}%` : 'not measured'}
                   {ep.rate > 0 && ep.errorRateSource && ep.errorRateSource !== 'metrics' && (
-                    <span className="ml-1 text-[9px] font-normal text-slate-500">{ep.errorRateSource}</span>
+                    <span className="ml-1 text-[9px] font-normal text-slate-400">{ep.errorRateSource}</span>
                   )}
                 </td>
                 <td className="p-3 text-right text-slate-300">
                   {ep.latencyP50 > 0 ? (
                     `${(ep.latencyP50 * 1000).toFixed(1)} ms`
                   ) : (
-                    <span className="text-slate-500">not measured</span>
+                    <span className="text-slate-400">not measured</span>
                   )}
                 </td>
                 <td className={`p-3 text-right font-semibold ${isSlowP95 ? 'text-amber-400' : 'text-slate-200'}`}>
                   {ep.latencyP95 > 0 ? (
                     `${(ep.latencyP95 * 1000).toFixed(1)} ms`
                   ) : (
-                    <span className="text-slate-500">not measured</span>
+                    <span className="text-slate-400">not measured</span>
                   )}
                 </td>
                 <td className="p-3 text-right text-slate-400">
                   {ep.latencyP99 > 0 ? (
                     `${(ep.latencyP99 * 1000).toFixed(1)} ms`
                   ) : (
-                    <span className="text-slate-500">not measured</span>
+                    <span className="text-slate-400">not measured</span>
                   )}
                 </td>
               </tr>

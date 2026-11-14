@@ -152,26 +152,38 @@ func (h *Handlers) GetHealth(c *gin.Context) {
 
 	health := models.HealthResponse{Status: "ok"}
 
-	if _, err := h.promClient.Query(ctx, "up"); err != nil {
-		health.Prometheus = "error"
+	if h.promClient != nil {
+		if _, err := h.promClient.Query(ctx, "up"); err != nil {
+			health.Prometheus = "error"
+		} else {
+			health.Prometheus = "ok"
+		}
 	} else {
-		health.Prometheus = "ok"
+		health.Prometheus = "not connected"
 	}
 
-	if err := h.lokiClient.Health(ctx); err != nil {
-		health.Loki = "error: " + err.Error()
+	if h.lokiClient != nil {
+		if err := h.lokiClient.Health(ctx); err != nil {
+			health.Loki = "error: " + err.Error()
+		} else {
+			health.Loki = "ok"
+		}
 	} else {
-		health.Loki = "ok"
+		health.Loki = "not connected"
 	}
 
-	if err := h.tempoClient.Health(ctx); err != nil {
-		health.Tempo = "error: " + err.Error()
+	if h.tempoClient != nil {
+		if err := h.tempoClient.Health(ctx); err != nil {
+			health.Tempo = "error: " + err.Error()
+		} else {
+			health.Tempo = "ok"
+		}
 	} else {
-		health.Tempo = "ok"
+		health.Tempo = "not connected"
 	}
 
 	if h.k8sClient != nil {
-		info, err := h.k8sClient.GetClusterInfo()
+		info, err := h.k8sClient.GetClusterInfo(c.Request.Context())
 		if err != nil {
 			health.K8s = "error: " + err.Error()
 		} else {

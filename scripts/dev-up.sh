@@ -152,6 +152,7 @@ start_backend() {
   FRONTEND_DIR="${FRONTEND_DIR:-frontend/dist}" \
     nohup ./bin/kubevision-backend > "$RUN_DIR/backend.log" 2>&1 &
   echo $! > "$RUN_DIR/backend.pid"
+  disown $! 2>/dev/null || true
 
   for _ in $(seq 1 20); do
     curl -sf -m 2 "localhost:$port/api/v1/health" >/dev/null 2>&1 && break

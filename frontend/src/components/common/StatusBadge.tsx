@@ -26,7 +26,7 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({ status, size = 'md' })
 
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded-full font-medium border font-mono tracking-tight ${px} ${style}`}
+      className={`inline-flex items-center gap-1.5 rounded-sm font-medium border font-mono tracking-tight ${px} ${style}`}
     >
       <span className={`w-1.5 h-1.5 rounded-full ${dotStyle}`} />
       <span>{status || 'Unknown'}</span>

@@ -31,7 +31,7 @@ export const LanguageBadge: React.FC<{ language: string }> = ({ language }) => {
   return (
     <span
       title={`Runtime language reported by the service's traces: ${language}`}
-      className="inline-flex items-center px-1.5 py-px rounded bg-slate-800 border border-slate-700 text-[10px] leading-4 text-violet-300 whitespace-nowrap"
+      className="inline-flex items-center px-1.5 py-px rounded bg-slate-800 border border-slate-700 text-[10px] leading-4 text-slate-300 whitespace-nowrap"
     >
       {label}
     </span>

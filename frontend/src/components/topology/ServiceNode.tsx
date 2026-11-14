@@ -2,6 +2,7 @@ import React, { memo } from 'react';
 import { Handle, Position, NodeProps } from '@xyflow/react';
 import { AlertTriangle } from 'lucide-react';
 import type { MetricSource } from '../../types/api';
+import { formatBytesRate, formatErrorRate } from '../../lib/format';
 import { languageLabel } from '../common/LanguageBadge';
 
 interface ServiceNodeData {
@@ -13,9 +14,17 @@ interface ServiceNodeData {
   rate?: number;
   errorRate?: number;
   latencyP95?: number;
+  bytesRate?: number;
   rateSource?: MetricSource;
   latencySource?: MetricSource;
   status?: string;
+  /** Jump to the failing traces of this service (server-filtered by status). */
+  onFailingTraces?: () => void;
+  /** 'origin' started the cascade, 'inherited' only passed it on. */
+  errorRole?: 'origin' | 'inherited';
+  /** For an inherited service: the downstream service that failed first. */
+  errorCause?: string;
+  onFocusCause?: () => void;
   replicas?: number;
   ready?: number;
   selected?: boolean;
@@ -25,7 +34,8 @@ export const ServiceNode = memo(({ data, selected }: NodeProps<any>) => {
   const nodeData = data as ServiceNodeData;
   const isExternal = nodeData.type === 'external';
   const isCrossNamespace = nodeData.type === 'cross-namespace';
-  const hasErrors = (nodeData.errorRate || 0) > 0.01;
+  const isOutgoingEgress = isExternal && (nodeData.label === 'outgoing' || nodeData.label.includes('outgoing'));
+  const hasErrors = (nodeData.errorRate || 0) > 0;
   const isHighLatency = (nodeData.latencyP95 || 0) > 0.5;
 
   let borderColor = 'border-slate-700/80 hover:border-cyan-500/60';
@@ -35,7 +45,9 @@ export const ServiceNode = memo(({ data, selected }: NodeProps<any>) => {
   } else if (isCrossNamespace) {
     borderColor = 'border-violet-500/60 border-dashed hover:border-violet-300';
   } else if (hasErrors) {
-    borderColor = 'border-rose-500/80';
+    // Only the service that started the cascade gets the full-strength border;
+    // victims stay visible but subordinate.
+    borderColor = nodeData.errorRole === 'inherited' ? 'border-rose-400/40' : 'border-rose-500/80';
   } else if (isHighLatency) {
     borderColor = 'border-amber-500/80';
   } else if (selected) {
@@ -50,17 +62,19 @@ export const ServiceNode = memo(({ data, selected }: NodeProps<any>) => {
   const hasLatency = (nodeData.latencyP95 ?? 0) > 0;
 
   // The old hint blamed non-Go runtimes for needing SDK injection. That was
-  // wrong: Beyla instruments every supported language natively. When all
+  // wrong: OBI instruments every supported language natively. When all
   // non-Go services are dark while Go services report, the cause is almost
   // always the HOST KERNEL - Clang LTO/ThinLTO mangles the kprobe symbols the
   // generic tracer attaches to, which aborts the whole generic tracer.
-  const noDataHint = isExternal
-    ? 'External dependency: no Kubernetes workload metrics are available for this node.'
-    : isCrossNamespace
-      ? 'Dependency in another namespace. Its workload metrics are outside the selected namespace view.'
-      : 'No eBPF telemetry for this service. If every non-Go service is dark while Go services ' +
-        'report, suspect the host kernel: Clang LTO/ThinLTO builds mangle the kprobe symbols the ' +
-        'generic tracer needs. Verify with: grep unix_stream_recvmsg /proc/kallsyms';
+  const noDataHint = isOutgoingEgress
+    ? 'External egress: captures network calls exiting the cluster (cloud metadata, external endpoints, APIs). Server-side latencies are not instrumented on external hosts.'
+    : isExternal
+      ? 'External dependency: no Kubernetes workload metrics are available for this node.'
+      : isCrossNamespace
+        ? 'Dependency in another namespace. Its workload metrics are outside the selected namespace view.'
+        : 'No eBPF telemetry for this service. If every non-Go service is dark while Go services ' +
+          'report, suspect the host kernel: Clang LTO/ThinLTO builds mangle the kprobe symbols the ' +
+          'generic tracer needs. Verify with: grep unix_stream_recvmsg /proc/kallsyms';
 
   // Provenance. Rendered as plain text rather than an icon so the caveat is
   // visible without hovering - the whole point is that the number is weaker
@@ -111,8 +125,15 @@ export const ServiceNode = memo(({ data, selected }: NodeProps<any>) => {
       {/* Top row: Name and workload / boundary label */}
       <div className="flex items-start justify-between gap-2 mb-2">
         <div className="flex items-center gap-1.5 min-w-0 overflow-hidden">
-          <span className="font-semibold text-sm text-slate-100 truncate tracking-tight" title={nodeData.label}>
-            {nodeData.label}
+          <span
+            className="font-semibold text-sm text-slate-100 truncate tracking-tight"
+            title={
+              isOutgoingEgress
+                ? 'External egress traffic leaving the cluster (e.g. cloud metadata queries, external APIs, third-party services)'
+                : nodeData.label
+            }
+          >
+            {isOutgoingEgress ? 'outgoing (egress)' : nodeData.label}
           </span>
           {nodeData.language && (
             <span
@@ -148,36 +169,62 @@ export const ServiceNode = memo(({ data, selected }: NodeProps<any>) => {
       <div className="grid grid-cols-2 gap-2 pt-2.5 border-t border-slate-800/80 text-sm font-mono">
         <div title={hasRate ? sourceNote(nodeData.rateSource) : noDataHint}>
           <span className="text-slate-400 text-[10px] uppercase block tracking-wider">Inbound Req</span>
-          <span className={`font-medium ${hasRate ? 'text-slate-200' : 'text-slate-500'}`}>
-            {hasRate ? `${nodeData.rate!.toFixed(2)} req/s` : 'no data'}
+          <span className={`font-medium ${hasRate ? 'text-slate-200' : 'text-slate-400'}`}>
+            {hasRate ? `${nodeData.rate!.toFixed(2)} req/s` : (nodeData.bytesRate ? formatBytesRate(nodeData.bytesRate) : 'no data')}
             {hasRate && sourceTag(nodeData.rateSource) && (
-              <span className="ml-1 text-[9px] font-normal text-slate-500">{sourceTag(nodeData.rateSource)}</span>
+              <span className="ml-1 text-[9px] font-normal text-slate-400">{sourceTag(nodeData.rateSource)}</span>
             )}
           </span>
+          {hasRate && nodeData.bytesRate ? (
+            <span className="block text-[10px] text-cyan-400/90 font-normal">{formatBytesRate(nodeData.bytesRate)}</span>
+          ) : null}
         </div>
 
         <div className="text-right" title={hasLatency ? sourceNote(nodeData.latencySource) : noDataHint}>
           <span className="text-slate-400 text-[10px] uppercase block tracking-wider">P95 Latency</span>
           <span
             className={`font-medium ${
-              !hasLatency ? 'text-slate-500' : isHighLatency ? 'text-amber-400' : 'text-slate-200'
+              !hasLatency ? 'text-slate-400' : isHighLatency ? 'text-amber-400' : 'text-slate-200'
             }`}
           >
             {hasLatency ? `${(nodeData.latencyP95! * 1000).toFixed(2)} ms` : 'no data'}
             {hasLatency && sourceTag(nodeData.latencySource) && (
-              <span className="ml-1 text-[9px] font-normal text-slate-500">{sourceTag(nodeData.latencySource)}</span>
+              <span className="ml-1 text-[9px] font-normal text-slate-400">{sourceTag(nodeData.latencySource)}</span>
             )}
           </span>
         </div>
       </div>
 
       {hasErrors && (
-        <div className="mt-2 flex items-center justify-between text-[11px] font-mono text-rose-400 bg-rose-500/10 px-2 py-1 rounded border border-rose-500/20">
+        <button
+          type="button"
+          onClick={(event) => {
+            // Do not also select the node: the strip is a direct shortcut to
+            // the traces that explain the error rate.
+            event.stopPropagation();
+            nodeData.onFailingTraces?.();
+          }}
+          title={
+            nodeData.errorRole === 'inherited' && nodeData.errorCause
+              ? `Errors here follow a failing call to ${nodeData.errorCause}. Open the failing traces.`
+              : 'Error rate from measured request status codes. Open the failing traces.'
+          }
+          className={`mt-2 w-full flex items-center justify-between text-[11px] font-mono px-2 py-1 rounded border transition cursor-pointer ${
+            nodeData.errorRole === 'inherited'
+              ? 'text-rose-300/80 bg-rose-500/5 border-rose-500/20 hover:bg-rose-500/10'
+              : 'text-rose-400 bg-rose-500/10 border-rose-500/20 hover:bg-rose-500/20 hover:border-rose-500/40'
+          }`}
+        >
           <span className="flex items-center gap-1">
-            <AlertTriangle className="w-3 h-3" /> Errors
+            <AlertTriangle className="w-3 h-3" />
+            {nodeData.errorRole === 'inherited' && nodeData.errorCause ? (
+              <span className="truncate">via {nodeData.errorCause}</span>
+            ) : (
+              'Errors'
+            )}
           </span>
-          <span>{((nodeData.errorRate || 0) * 100).toFixed(1)}%</span>
-        </div>
+          <span>{formatErrorRate(nodeData.errorRate)}</span>
+        </button>
       )}
     </div>
   );

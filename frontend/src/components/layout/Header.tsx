@@ -18,12 +18,24 @@ const REFRESH_INTERVALS = [
   { label: '60s', value: 60 },
 ];
 
+// Views whose queries actually accept a relative window. The others render live
+// submitted/observed state (cluster, incidents, settings), where a window would
+// be a lie if it looked selectable.
+const TIME_SCOPED_TABS: ReadonlySet<string> = new Set([
+  'topology',
+  'services',
+  'traces',
+  'logs',
+  'events',
+]);
+
 /**
  * Slim status bar: telemetry store health on the left, global query
  * controls on the right. Brand and navigation live in the sidebar.
  */
 export const Header: React.FC = () => {
   const {
+    activeTab,
     activeNamespace,
     setActiveNamespace,
     timeWindow,
@@ -34,6 +46,8 @@ export const Header: React.FC = () => {
     lastRefreshed,
     health,
   } = useApp();
+
+  const windowApplies = TIME_SCOPED_TABS.has(activeTab);
 
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [customNsInput, setCustomNsInput] = useState('');
@@ -102,7 +116,7 @@ export const Header: React.FC = () => {
               role="menu"
               className="absolute right-0 mt-1.5 w-52 rounded-md border border-slate-800 bg-slate-900 py-1 shadow-xl z-50"
             >
-              <div className="px-3 pb-1.5 pt-1 text-[10px] font-medium uppercase tracking-wider text-slate-500">
+              <div className="px-3 pb-1.5 pt-1 text-[10px] font-medium uppercase tracking-wider text-slate-400">
                 Namespace
               </div>
               {(clusterNamespaces.length > 0
@@ -140,7 +154,7 @@ export const Header: React.FC = () => {
                     }
                   }}
                   aria-label="Custom namespace"
-                  className="w-full rounded-sm border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100 font-mono placeholder:text-slate-500 focus:outline-none focus:border-cyan-500"
+                  className="w-full rounded-sm border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-slate-100 font-mono placeholder:text-slate-400 focus:outline-none focus:border-cyan-500"
                 />
               </div>
             </div>
@@ -151,23 +165,44 @@ export const Header: React.FC = () => {
         <div
           role="group"
           aria-label="Time window"
-          className="hidden sm:flex items-center h-7 rounded-md border border-slate-800 bg-slate-900 p-0.5"
+          aria-disabled={!windowApplies}
+          title={
+            windowApplies
+              ? 'Relative time window for the current view'
+              : 'This view shows live state — no time window'
+          }
+          className={`hidden sm:flex items-center h-7 rounded-md border border-slate-800 bg-slate-900 p-0.5 ${
+            windowApplies ? '' : 'opacity-40'
+          }`}
         >
           <Clock className="w-3 h-3 text-slate-500 mx-1.5" />
           {TIME_WINDOWS.map((w) => (
             <button
               key={w}
               onClick={() => setTimeWindow(w)}
+              // Live-state tabs keep the picker in place (removing it would shift
+              // the bar between tabs) but disabled, so it never implies a scope.
+              disabled={!windowApplies}
               aria-pressed={timeWindow === w}
               className={`px-1.5 py-0.5 rounded-sm font-mono text-[11px] transition-colors ${
+                windowApplies ? 'cursor-pointer' : 'cursor-not-allowed'
+              } ${
                 timeWindow === w
                   ? 'bg-slate-800 text-slate-100 font-medium'
-                  : 'text-slate-400 hover:text-slate-200'
+                  : windowApplies
+                    ? 'text-slate-400 hover:text-slate-200'
+                    : 'text-slate-400'
               }`}
             >
               {w}
             </button>
           ))}
+          {/* aria-disabled gives no reason: spell it out for screen readers. */}
+          {!windowApplies && (
+            <span className="sr-only">
+              Time window unavailable: this view shows live cluster state and has no time range.
+            </span>
+          )}
         </div>
 
         {/* Refresh */}
@@ -194,7 +229,7 @@ export const Header: React.FC = () => {
           </button>
         </div>
 
-        <span className="hidden lg:inline text-[11px] font-mono text-slate-500 tabular-nums">
+        <span className="hidden lg:inline text-[11px] font-mono text-slate-400 tabular-nums">
           {lastRefreshed.toLocaleTimeString()}
         </span>
       </div>

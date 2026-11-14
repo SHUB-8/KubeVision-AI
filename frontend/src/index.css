@@ -35,6 +35,18 @@
   --color-cyan-400: oklch(0.77 0.1 215);
   --color-cyan-500: oklch(0.7 0.11 215);
   --color-cyan-600: oklch(0.6 0.1 215);
+
+  /* Ordinal sequence ramp — service identity in traces. One hue stepped by
+     lightness: position in the ramp encodes a service, so the ramp never
+     competes with the semantic status colors (emerald/amber/rose). */
+  --color-seq-1: oklch(0.82 0.045 215);
+  --color-seq-2: oklch(0.76 0.055 215);
+  --color-seq-3: oklch(0.7 0.065 215);
+  --color-seq-4: oklch(0.64 0.075 215);
+  --color-seq-5: oklch(0.58 0.072 215);
+  --color-seq-6: oklch(0.52 0.065 215);
+  --color-seq-7: oklch(0.46 0.055 215);
+  --color-seq-8: oklch(0.4 0.048 215);
 }
 
 :root {

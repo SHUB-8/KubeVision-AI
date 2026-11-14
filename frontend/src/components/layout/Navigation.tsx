@@ -87,10 +87,12 @@ export const Navigation: React.FC = () => {
 /** Horizontal nav for <md screens, rendered under the status bar. */
 export const MobileNav: React.FC = () => {
   const { activeTab, setActiveTab, setSelectedService } = useApp();
+  // The native scrollbar drew a stray pill under the tabs on mobile; it stays
+  // scrollable, only the bar itself is hidden.
   return (
     <nav
       aria-label="Primary"
-      className="md:hidden flex items-center gap-1 overflow-x-auto border-b border-slate-800 bg-slate-950 px-2 py-1.5"
+      className="md:hidden flex items-center gap-1 overflow-x-auto border-b border-slate-800 bg-slate-950 px-2 py-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
     >
       {TABS.map((tab) => {
         const Icon = tab.icon;

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, ReactNode } from 'react';
 import { HealthResponse, UISettings } from '../types/api';
 import { api } from '../services/api';
 
@@ -35,10 +35,14 @@ interface AppContextType {
   // One-shot seeds for cross-view navigation with preset filters (e.g. the
   // topology panel's "error logs" / "slow traces" actions). Consumers apply
   // the seed once and clear it.
-  logSeed: { keyword?: string } | null;
-  setLogSeed: (seed: { keyword?: string } | null) => void;
-  traceSeed: { minDurationMs?: number } | null;
-  setTraceSeed: (seed: { minDurationMs?: number } | null) => void;
+  // fromNs/toNs anchor the log query to the failing span's own time: jumping
+  // from a trace that happened minutes ago must not land in the live 5m window.
+  logSeed: { keyword?: string; pod?: string; fromNs?: number; toNs?: number } | null;
+  setLogSeed: (
+    seed: { keyword?: string; pod?: string; fromNs?: number; toNs?: number } | null
+  ) => void;
+  traceSeed: { minDurationMs?: number; status?: 'error' } | null;
+  setTraceSeed: (seed: { minDurationMs?: number; status?: 'error' } | null) => void;
   /** True once the persisted config (namespace, window) has been applied.
    *  Views gate their first fetch on this: otherwise every view fires one
    *  request without the saved namespace and a second one right after. */
@@ -73,14 +77,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [timeWindow, setTimeWindow] = useState<string>('5m');
   const [refreshInterval, setRefreshInterval] = useState<number>(15);
   const [refreshCount, setRefreshCount] = useState<number>(0);
-  const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
+  const [lastRefreshed, setLastRefreshed] = useState<Date>(() => new Date());
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [config, setConfig] = useState<UISettings | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [selectedService, setSelectedService] = useState<string | null>(null);
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(() => parseHash().traceId);
-  const [logSeed, setLogSeed] = useState<{ keyword?: string } | null>(null);
-  const [traceSeed, setTraceSeed] = useState<{ minDurationMs?: number } | null>(null);
+  const [logSeed, setLogSeed] = useState<{
+    keyword?: string;
+    pod?: string;
+    fromNs?: number;
+    toNs?: number;
+  } | null>(null);
+  const [traceSeed, setTraceSeed] = useState<{ minDurationMs?: number; status?: 'error' } | null>(null);
   const [configReady, setConfigReady] = useState(false);
 
   const addToast = useCallback((type: ToastMessage['type'], message: string) => {
@@ -169,7 +178,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setSelectedTraceId(traceId);
     };
     window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
+    // Pasting `#/traces` into an already-open tab replaces only the fragment,
+    // which fires hashchange but not popstate — without this the URL changes
+    // and the view does not. pushState (below) fires neither, so no loop.
+    window.addEventListener('hashchange', onPop);
+    return () => {
+      window.removeEventListener('popstate', onPop);
+      window.removeEventListener('hashchange', onPop);
+    };
   }, []);
 
   const updateConfigState = useCallback((newConfig: UISettings) => {
@@ -179,37 +195,59 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (newConfig.refreshInterval) setRefreshInterval(newConfig.refreshInterval);
   }, []);
 
+  const contextValue = useMemo<AppContextType>(
+    () => ({
+      activeTab,
+      setActiveTab,
+      activeNamespace,
+      setActiveNamespace,
+      timeWindow,
+      setTimeWindow,
+      refreshInterval,
+      setRefreshInterval,
+      refreshCount,
+      triggerRefresh,
+      lastRefreshed,
+      health,
+      config,
+      updateConfigState,
+      toasts,
+      addToast,
+      removeToast,
+      selectedService,
+      setSelectedService,
+      selectedTraceId,
+      setSelectedTraceId,
+      logSeed,
+      setLogSeed,
+      traceSeed,
+      setTraceSeed,
+      configReady,
+    }),
+    [
+      activeTab,
+      activeNamespace,
+      timeWindow,
+      refreshInterval,
+      refreshCount,
+      triggerRefresh,
+      lastRefreshed,
+      health,
+      config,
+      updateConfigState,
+      toasts,
+      addToast,
+      removeToast,
+      selectedService,
+      selectedTraceId,
+      logSeed,
+      traceSeed,
+      configReady,
+    ]
+  );
+
   return (
-    <AppContext.Provider
-      value={{
-        activeTab,
-        setActiveTab,
-        activeNamespace,
-        setActiveNamespace,
-        timeWindow,
-        setTimeWindow,
-        refreshInterval,
-        setRefreshInterval,
-        refreshCount,
-        triggerRefresh,
-        lastRefreshed,
-        health,
-        config,
-        updateConfigState,
-        toasts,
-        addToast,
-        removeToast,
-        selectedService,
-        setSelectedService,
-        selectedTraceId,
-        setSelectedTraceId,
-        logSeed,
-        setLogSeed,
-        traceSeed,
-        setTraceSeed,
-        configReady,
-      }}
-    >
+    <AppContext.Provider value={contextValue}>
       {children}
     </AppContext.Provider>
   );

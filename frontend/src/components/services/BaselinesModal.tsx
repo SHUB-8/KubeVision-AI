@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { api } from '../../services/api';
 import { Baseline } from '../../types/api';
-import { X, RefreshCw, Database, Clock, TrendingUp, AlertCircle, CheckCircle } from 'lucide-react';
+import { X, RefreshCw, Database, TrendingUp } from 'lucide-react';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 
 interface BaselinesModalProps {
@@ -56,7 +56,7 @@ export const BaselinesModal: React.FC<BaselinesModalProps> = ({
         {/* Modal Header */}
         <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-800/40">
           <div className="flex items-center gap-3">
-            <div className="p-2 rounded-md bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
+            <div className="p-2 rounded-md bg-cyan-500/10 border border-cyan-500/20 text-cyan-400">
               <Database className="w-5 h-5" />
             </div>
             <div>
@@ -71,7 +71,7 @@ export const BaselinesModal: React.FC<BaselinesModalProps> = ({
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-slate-200 rounded-lg hover:bg-slate-800 transition"
+            className="p-1.5 text-slate-400 hover:text-slate-200 rounded-md hover:bg-slate-800 transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
@@ -86,7 +86,7 @@ export const BaselinesModal: React.FC<BaselinesModalProps> = ({
             <button
               onClick={handleRecalculate}
               disabled={recalculating}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-semibold shadow-indigo-600/20 transition active:scale-95 shrink-0"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-slate-950 text-xs font-semibold transition-colors shrink-0"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${recalculating ? 'animate-spin' : ''}`} />
               <span>{recalculating ? 'Calculating...' : 'Recalculate Now'}</span>
@@ -143,7 +143,7 @@ export const BaselinesModal: React.FC<BaselinesModalProps> = ({
         <div className="p-3 bg-slate-800/40 border-t border-slate-800 flex justify-end">
           <button
             onClick={onClose}
-            className="px-4 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 transition"
+            className="px-4 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 transition-colors"
           >
             Close
           </button>

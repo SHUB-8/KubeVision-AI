@@ -25,8 +25,11 @@ func (b *Baseliner) CalculateBaselines(ctx context.Context, namespace, window st
 	if window == "" {
 		window = models.DefaultWindow
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	rateData, err := b.promClient.GetServiceRates(namespace, window)
+	rateData, err := b.promClient.GetServiceRates(ctx, namespace, window)
 	if err != nil {
 		return fmt.Errorf("failed to get rates: %w", err)
 	}
@@ -66,33 +69,48 @@ func (b *Baseliner) CalculateBaselines(ctx context.Context, namespace, window st
 	}
 
 	for _, q := range quantiles {
-		latencyData, err := b.promClient.GetServiceLatency(namespace, window, q.value)
-		if err != nil {
-			continue
+		latencyData, _ := b.promClient.GetServiceLatency(ctx, namespace, window, q.value)
+		rpcLatencyData, _ := b.promClient.GetServiceRPCLatency(ctx, namespace, window, q.value)
+		clientLatencyData, _ := b.promClient.GetClientLatencyByServer(ctx, namespace, window, q.value)
+
+		svcLatencies := make(map[string]float64)
+		// 1. HTTP server latency
+		for _, r := range prometheus.ParseMetricEntries(latencyData) {
+			if svc := prometheus.MetricServiceName(r.Metric); svc != "" {
+				if v, ok := finiteMetric(r.FloatValue()); ok && v > 0 {
+					svcLatencies[svc] = v
+				}
+			}
 		}
-		var latencyResults []prometheus.VectorResult
-		if err := json.Unmarshal(latencyData, &latencyResults); err == nil {
-			for _, r := range latencyResults {
-				svc := prometheus.MetricServiceName(r.Metric)
-				if svc == "" {
-					continue
+		// 2. gRPC server latency (for services without HTTP latency)
+		for _, r := range prometheus.ParseMetricEntries(rpcLatencyData) {
+			if svc := prometheus.MetricServiceName(r.Metric); svc != "" && svcLatencies[svc] == 0 {
+				if v, ok := finiteMetric(r.FloatValue()); ok && v > 0 {
+					svcLatencies[svc] = v
 				}
-				value, ok := finiteMetric(r.FloatValue())
-				if !ok {
-					continue
+			}
+		}
+		// 3. Caller-observed latency (for datastores or uninstrumented servers)
+		for _, r := range prometheus.ParseMetricEntries(clientLatencyData) {
+			if serverAddr := r.Metric["server_address"]; serverAddr != "" && svcLatencies[serverAddr] == 0 {
+				if v, ok := finiteMetric(r.FloatValue()); ok && v > 0 {
+					svcLatencies[serverAddr] = v
 				}
-				key := fmt.Sprintf("baseline:%s:latency_%s:%s", svc, q.name, window)
-				baseline := models.Baseline{
-					Service:   svc,
-					Endpoint:  "/",
-					Metric:    fmt.Sprintf("latency_%s", q.name),
-					Value:     value,
-					Window:    window,
-					UpdatedAt: time.Now().UTC().Format(time.RFC3339),
-				}
-				if err := b.store.SetWithTTL(key, baseline, storage.DefaultRetentionTTL); err != nil {
-					return fmt.Errorf("failed to store baseline: %w", err)
-				}
+			}
+		}
+
+		for svc, value := range svcLatencies {
+			key := fmt.Sprintf("baseline:%s:latency_%s:%s", svc, q.name, window)
+			baseline := models.Baseline{
+				Service:   svc,
+				Endpoint:  "/",
+				Metric:    fmt.Sprintf("latency_%s", q.name),
+				Value:     value,
+				Window:    window,
+				UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+			}
+			if err := b.store.SetWithTTL(key, baseline, storage.DefaultRetentionTTL); err != nil {
+				return fmt.Errorf("failed to store baseline: %w", err)
 			}
 		}
 	}

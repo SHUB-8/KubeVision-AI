@@ -33,10 +33,10 @@ Reproducibility: chart/k3s versions are unpinned by default. Pin them with env
 vars before running `setup.sh`:
 
 ```bash
-K3S_VERSION=v1.31.5+k3s1 \
-CHART_KUBE_PROMETHEUS_VERSION=91.8.2 \
-CHART_LOKI_VERSION=7.3.0 \
-CHART_FLUENT_BIT_VERSION=0.49.1 \
+K3S_VERSION=v1.37.2+k3s1 \
+CHART_KUBE_PROMETHEUS_VERSION=93.2.0 \
+CHART_LOKI_VERSION=7.6.0 \
+CHART_FLUENT_BIT_VERSION=0.58.3 \
 ./scripts/setup.sh
 ```
 
@@ -109,9 +109,9 @@ Common questions:
 
 - **Helm values** (charts): `deploy/helm/{prometheus,loki,fluent-bit}-values.yaml`
   — retention, storage mode, caches. Edit + re-run `./scripts/setup.sh stack`.
-- **Raw manifests** (no chart): `deploy/k8s/collection/{beyla,tempo}-*.yaml` —
+- **Raw manifests** (no chart): `deploy/k8s/collection/{obi,tempo}-*.yaml` —
   one Kubernetes resource per file (`<app>-<kind>.yaml`: tempo
-  configmap/deployment/service; beyla
+  configmap/deployment/service; obi
   serviceaccount/clusterrole/clusterrolebinding/configmap/service/servicemonitor/daemonset).
   Edit + `kubectl apply -f <file>` (or `./scripts/setup.sh stack`).
 - **Backend env vars** (when running locally): `PORT`, `PROMETHEUS_URL`,

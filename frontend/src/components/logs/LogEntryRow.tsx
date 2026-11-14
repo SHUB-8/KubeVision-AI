@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { LogEntry } from '../../types/api';
-import { Copy, Check, Terminal, AlertCircle } from 'lucide-react';
+import { Copy, Check } from 'lucide-react';
 
 interface LogEntryRowProps {
   entry: LogEntry;
@@ -8,6 +8,16 @@ interface LogEntryRowProps {
   /** When provided, the pod badge becomes a button that isolates this pod's stream. */
   onPodClick?: (pod: string) => void;
 }
+
+/**
+ * Pod names share a long deployment/replicaset prefix and differ only in the
+ * final hash, so a plain trailing truncation hides exactly the characters that
+ * tell two replicas apart. Keep a head and the last four characters instead.
+ */
+const middleEllipsis = (value: string, head = 15, tail = 4): string => {
+  if (value.length <= head + tail + 1) return value;
+  return `${value.slice(0, head)}…${value.slice(-tail)}`;
+};
 
 export const LogEntryRow: React.FC<LogEntryRowProps> = ({ entry, rawMode, onPodClick }) => {
   const [copied, setCopied] = useState(false);
@@ -69,6 +79,7 @@ export const LogEntryRow: React.FC<LogEntryRowProps> = ({ entry, rawMode, onPodC
   }
 
   const podName = entry.labels?.kubernetes_pod_name || entry.labels?.pod || entry.stream || 'pod';
+  const podLabel = middleEllipsis(podName);
 
   return (
     <div className="group flex items-start gap-3 px-3 py-2 hover:bg-slate-800/40 text-xs font-mono transition border-b border-slate-800/40">
@@ -88,14 +99,17 @@ export const LogEntryRow: React.FC<LogEntryRowProps> = ({ entry, rawMode, onPodC
       {onPodClick ? (
         <button
           onClick={() => onPodClick(podName)}
-          className="text-[10px] px-2 py-0.5 rounded bg-slate-800/80 text-slate-300 border border-slate-700/60 truncate max-w-[140px] shrink-0 hover:text-cyan-300 hover:border-cyan-500/40 transition"
+          className="text-[10px] px-2 py-0.5 rounded bg-slate-800/80 text-slate-300 border border-slate-700/60 truncate max-w-[140px] shrink-0 hover:text-cyan-300 hover:border-cyan-500/40 transition-colors"
           title={`Show only logs from ${podName}`}
         >
-          {podName}
+          {podLabel}
         </button>
       ) : (
-        <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800/80 text-slate-300 border border-slate-700/60 truncate max-w-[140px] shrink-0">
-          {podName}
+        <span
+          className="text-[10px] px-2 py-0.5 rounded bg-slate-800/80 text-slate-300 border border-slate-700/60 truncate max-w-[140px] shrink-0"
+          title={podName}
+        >
+          {podLabel}
         </span>
       )}
 

@@ -3,7 +3,7 @@
 # KubeVision AI — Observed Demo Application (Google microservices-demo)
 #
 # Manages the boutique demo workload in ns/boutique.
-# Observed unmodified: KubeVision is eBPF-only (Beyla). The demo app is NOT
+# Observed unmodified: KubeVision is eBPF-only (OBI). The demo app is NOT
 # instrumented with any SDK, NOT restarted after deploy, and carries no
 # OpenTelemetry annotations (see SRS 1.1: zero application changes).
 #
@@ -41,7 +41,7 @@ case "${1:-}" in
 
     echo ""
     echo "Demo app is up! (Deployed unmodified — no SDK, no sidecars;"
-    echo "Beyla instruments it from the node via eBPF.) Loadgenerator is generating traffic."
+    echo "OBI instruments it from the node via eBPF.) Loadgenerator is generating traffic."
     echo "View pods with:        ./scripts/demo-app.sh status"
     echo "Open in browser with:  ./scripts/demo-app.sh port-forward"
     ;;

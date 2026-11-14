@@ -1,8 +1,9 @@
 import React from 'react';
 import { PodInfo } from '../../types/api';
 import { useApp } from '../../context/AppContext';
-import { X, Cpu, Server, Terminal, ShieldCheck, Clock, Activity } from 'lucide-react';
+import { X, Cpu, Terminal } from 'lucide-react';
 import { StatusBadge } from '../common/StatusBadge';
+import { formatCores, formatBytes } from '../../lib/format';
 
 interface PodDetailModalProps {
   pod: PodInfo;
@@ -15,7 +16,7 @@ export const PodDetailModal: React.FC<PodDetailModalProps> = ({ pod, onClose }) 
   const handleOpenLogs = () => {
     // extract service name from pod name (e.g. cartservice-xxx -> cartservice)
     const parts = pod.name.split('-');
-    const svcName = parts.length > 2 ? parts.slice(0, -2).join('-') : parts[0];
+    const svcName = pod.workloadName || (parts.length > 2 ? parts.slice(0, -2).join('-') : parts[0]);
     setSelectedService(svcName);
     setActiveTab('logs');
     onClose();
@@ -41,7 +42,7 @@ export const PodDetailModal: React.FC<PodDetailModalProps> = ({ pod, onClose }) 
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-slate-200 rounded-lg hover:bg-slate-800 transition"
+            className="p-1.5 text-slate-400 hover:text-slate-200 rounded-md hover:bg-slate-800 transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
@@ -77,13 +78,58 @@ export const PodDetailModal: React.FC<PodDetailModalProps> = ({ pod, onClose }) 
               <span className="text-slate-300 truncate">{pod.age}</span>
             </div>
           </div>
+
+          {/* Resource Usage (CPU & Memory) */}
+          <div className="p-4 bg-slate-800/50 rounded-md border border-slate-700/60 space-y-3">
+            <div>
+              <div className="flex justify-between items-center mb-1">
+                <span className="text-slate-400 text-[10px]">CPU Usage</span>
+                <span className="text-slate-200">
+                  {formatCores(pod.cpuUsageCores)}
+                  {pod.cpuLimitCores ? ` / ${formatCores(pod.cpuLimitCores)} limit` : ''}
+                </span>
+              </div>
+              {pod.cpuLimitCores && pod.cpuUsageCores ? (
+                <div className="w-full bg-slate-700/50 h-1.5 rounded-full overflow-hidden">
+                  <div
+                    className="bg-cyan-400 h-full rounded-full transition-all"
+                    style={{ width: `${Math.min(100, (pod.cpuUsageCores / pod.cpuLimitCores) * 100)}%` }}
+                  />
+                </div>
+              ) : null}
+            </div>
+
+            <div>
+              <div className="flex justify-between items-center mb-1">
+                <span className="text-slate-400 text-[10px]">Memory (Working Set)</span>
+                <span className="text-slate-200">
+                  {formatBytes(pod.memoryUsageBytes)}
+                  {pod.memoryLimitBytes ? ` / ${formatBytes(pod.memoryLimitBytes)} limit` : ''}
+                </span>
+              </div>
+              {pod.memoryLimitBytes && pod.memoryUsageBytes ? (
+                <div className="w-full bg-slate-700/50 h-1.5 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all ${
+                      pod.memoryUsageBytes / pod.memoryLimitBytes > 0.85
+                        ? 'bg-rose-400'
+                        : pod.memoryUsageBytes / pod.memoryLimitBytes > 0.7
+                        ? 'bg-amber-400'
+                        : 'bg-emerald-400'
+                    }`}
+                    style={{ width: `${Math.min(100, (pod.memoryUsageBytes / pod.memoryLimitBytes) * 100)}%` }}
+                  />
+                </div>
+              ) : null}
+            </div>
+          </div>
         </div>
 
         {/* Footer */}
         <div className="p-4 bg-slate-800/40 border-t border-slate-800 flex justify-between items-center">
           <button
             onClick={handleOpenLogs}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-emerald-600/20 transition active:scale-95"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-semibold transition-colors"
           >
             <Terminal className="w-3.5 h-3.5" />
             <span>Stream Pod Logs</span>
@@ -91,7 +137,7 @@ export const PodDetailModal: React.FC<PodDetailModalProps> = ({ pod, onClose }) 
 
           <button
             onClick={onClose}
-            className="px-4 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 transition"
+            className="px-4 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 transition-colors"
           >
             Close
           </button>

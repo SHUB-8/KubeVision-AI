@@ -7,7 +7,7 @@
 # Usage:
 #   ./scripts/setup.sh                    # cluster prerequisites + k3s + stack (default)
 #   ./scripts/setup.sh cluster            # only the k3s cluster bootstrap
-#   ./scripts/setup.sh stack              # only the observability stack (Prometheus/Loki/Tempo/Beyla/Fluent Bit)
+#   ./scripts/setup.sh stack              # only the observability stack (Prometheus/Loki/Tempo/OBI/Fluent Bit)
 #   ./scripts/setup.sh --with-demo        # setup everything, then install the boutique demo app
 #
 # Cluster target:
@@ -16,15 +16,15 @@
 #   - Skips cleanly if you already have a Kubernetes cluster (use `stack` only)
 #
 # Stack target:
-#   - kube-prometheus-stack, Loki, Fluent Bit (Helm) + Tempo and OBI/Beyla (raw manifests)
+#   - kube-prometheus-stack, Loki, Fluent Bit (Helm) + Tempo and OBI (raw manifests)
 #   - eBPF-only collection: no SDK injection, no sidecars, observed apps never modified
 #
 # Reproducibility: chart versions are unpinned by default (matching the old
 # behaviour) but can be pinned explicitly:
-#   K3S_VERSION=v1.31.5+k3s1
-#   CHART_KUBE_PROMETHEUS_VERSION=91.8.2
-#   CHART_LOKI_VERSION=7.3.0
-#   CHART_FLUENT_BIT_VERSION=0.49.1
+#   K3S_VERSION=v1.37.2+k3s1
+#   CHART_KUBE_PROMETHEUS_VERSION=93.2.0
+#   CHART_LOKI_VERSION=7.6.0
+#   CHART_FLUENT_BIT_VERSION=0.58.3
 #
 # Idempotent: safe to run multiple times without disrupting existing state.
 # ==============================================================================
@@ -156,7 +156,7 @@ configure_k3s() {
   CONFIG_FILE="/etc/rancher/k3s/config.yaml"
   NODE_IP=""
   if [ "$IS_WSL" = true ]; then
-    NODE_IP="$(ip addr show eth0 2>/dev/null | grep -Po 'inet \K[\d.]+' || true)"
+    NODE_IP="$(ip addr show eth0 2>/dev/null | awk '/inet / {sub("/.*", "", $2); print $2}' || true)"
   fi
 
   if [ ! -f "$CONFIG_FILE" ]; then
@@ -256,7 +256,7 @@ sync_windows_kubeconfig() {
 
   if [ -n "$win_kube_dir" ] && [ -w "$win_kube_dir" ]; then
     local node_ip
-    node_ip="$(ip addr show eth0 2>/dev/null | grep -Po 'inet \K[\d.]+' || true)"
+    node_ip="$(ip addr show eth0 2>/dev/null | awk '/inet / {sub("/.*", "", $2); print $2}' || true)"
     if [ -n "$node_ip" ]; then
       local win_k3s_cfg="$win_kube_dir/k3s.yaml"
       sed -e "s|https://127.0.0.1:6443|https://${node_ip}:6443|g" \
@@ -336,6 +336,23 @@ helm_with_version() {
   fi
 }
 
+cleanup_legacy_beyla() {
+  # The collector shipped under the name "beyla" until the OBI rename. OBI is a
+  # different binary, so applying the OBI manifests does NOT replace the legacy
+  # DaemonSet: both would run (double eBPF collection, competing BPF maps).
+  # Remove the legacy objects once, idempotently, while they still exist.
+  local ns="${1:-monitoring}"
+  kubectl -n "$ns" get ds beyla >/dev/null 2>&1 || return 0
+  log_warn "Legacy 'beyla' collector found in ns/$ns; removing it (superseded by 'obi')."
+  kubectl -n "$ns" delete ds beyla --ignore-not-found 2>/dev/null || true
+  kubectl -n "$ns" delete svc beyla --ignore-not-found 2>/dev/null || true
+  kubectl -n "$ns" delete cm beyla-config --ignore-not-found 2>/dev/null || true
+  kubectl -n "$ns" delete sa beyla --ignore-not-found 2>/dev/null || true
+  kubectl -n "$ns" delete servicemonitor beyla --ignore-not-found 2>/dev/null || true
+  kubectl delete clusterrole beyla --ignore-not-found 2>/dev/null || true
+  kubectl delete clusterrolebinding beyla --ignore-not-found 2>/dev/null || true
+}
+
 install_observability_stack() {
   log_info "=== Deploying KubeVision Observability Stack ==="
 
@@ -388,14 +405,16 @@ install_observability_stack() {
                 -f deploy/k8s/collection/tempo-deployment.yaml \
                 -f deploy/k8s/collection/tempo-service.yaml
 
+  cleanup_legacy_beyla monitoring
+
   log_info "Deploying OBI (eBPF telemetry DaemonSet)..."
-  kubectl apply -f deploy/k8s/collection/beyla-serviceaccount.yaml \
-                -f deploy/k8s/collection/beyla-clusterrole.yaml \
-                -f deploy/k8s/collection/beyla-clusterrolebinding.yaml \
-                -f deploy/k8s/collection/beyla-configmap.yaml \
-                -f deploy/k8s/collection/beyla-service.yaml \
-                -f deploy/k8s/collection/beyla-servicemonitor.yaml \
-                -f deploy/k8s/collection/beyla-daemonset.yaml
+  kubectl apply -f deploy/k8s/collection/obi-serviceaccount.yaml \
+                -f deploy/k8s/collection/obi-clusterrole.yaml \
+                -f deploy/k8s/collection/obi-clusterrolebinding.yaml \
+                -f deploy/k8s/collection/obi-configmap.yaml \
+                -f deploy/k8s/collection/obi-service.yaml \
+                -f deploy/k8s/collection/obi-servicemonitor.yaml \
+                -f deploy/k8s/collection/obi-daemonset.yaml
 
   echo ""
   log_info "Waiting for collection stack workloads to become ready..."
@@ -403,7 +422,7 @@ install_observability_stack() {
   kubectl -n monitoring rollout status statefulset/prometheus-prometheus-kube-prometheus-prometheus --timeout=300s
   kubectl -n monitoring rollout status statefulset/loki --timeout=300s
   kubectl -n monitoring rollout status ds/fluent-bit --timeout=180s
-  kubectl -n monitoring rollout status ds/beyla --timeout=180s
+  kubectl -n monitoring rollout status ds/obi --timeout=180s
 
   echo ""
   log_success "=========================================================="
@@ -417,7 +436,7 @@ install_observability_stack() {
   echo "  Prometheus:  http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090"
   echo "  Loki:        http://loki-gateway.monitoring.svc:80 (or http://loki.monitoring.svc:3100)"
   echo "  Tempo:       http://tempo.monitoring.svc:3200 (OTLP: :4317/:4318)"
-  echo "  OBI:         http://beyla.monitoring.svc:8999/metrics"
+  echo "  OBI:         http://obi.monitoring.svc:8999/metrics"
   echo ""
   echo "Next steps:"
   echo "  1. Deploy demo app:   ./scripts/demo-app.sh install"
@@ -432,17 +451,17 @@ Usage: $0 [TARGET] [OPTIONS]
 Targets:
   (none) | all   Cluster prerequisites + k3s + observability stack (default)
   cluster        Only the single-node k3s bootstrap and kubeconfig
-  stack          Only the observability stack (Helm charts + Tempo + OBI/Beyla)
+  stack          Only the observability stack (Helm charts + Tempo + OBI)
 
 Options:
   --with-demo    After setup, install the boutique demo app (ns/boutique)
   -h, --help     Show this help message
 
 Pin versions (optional, recommended for reproducibility):
-  K3S_VERSION=v1.31.5+k3s1
-  CHART_KUBE_PROMETHEUS_VERSION=91.8.2
-  CHART_LOKI_VERSION=7.3.0
-  CHART_FLUENT_BIT_VERSION=0.49.1
+  K3S_VERSION=v1.37.2+k3s1
+  CHART_KUBE_PROMETHEUS_VERSION=93.2.0
+  CHART_LOKI_VERSION=7.6.0
+  CHART_FLUENT_BIT_VERSION=0.58.3
 
 If you already have a Kubernetes cluster, run:  $0 stack
 EOF

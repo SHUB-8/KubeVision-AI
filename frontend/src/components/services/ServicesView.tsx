@@ -245,17 +245,18 @@ export const ServicesView: React.FC = () => {
             return (
               <div
                 key={svc.name}
-                className="rounded-md border border-slate-800 bg-slate-900/60 overflow-hidden transition-all duration-200 hover:border-slate-700"
+                className="rounded-md border border-slate-800 bg-slate-900/60 overflow-hidden transition-colors duration-150 hover:border-slate-700"
               >
                 {/* Service Header Row */}
                 <div className="p-4 sm:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  {/* Left: Expander, Name & Replicas. Fixed width on md+ so the
-                      RED columns below align across rows regardless of name and
-                      source-label length ("client-observed" vs "metrics"). */}
-                  <div className="flex items-center gap-3 md:w-[20rem] md:shrink-0">
+                  {/* Left: expander, name and replica/meta line. It flexes
+                      instead of holding a fixed width so the meta line cannot
+                      wrap mid-word; the RED and action columns stay fixed, so
+                      they still align across rows. */}
+                  <div className="flex items-center gap-3 md:flex-1 md:min-w-0">
                     <button
                       onClick={() => toggleEndpoints(svc.name)}
-                      className="p-1 rounded-lg text-slate-400 hover:text-cyan-400 hover:bg-slate-800 transition"
+                      className="p-1 rounded-md text-slate-400 hover:text-cyan-400 hover:bg-slate-800 transition-colors"
                       title={isExpanded ? 'Collapse Endpoints' : 'Expand Endpoints'}
                     >
                       {isExpanded ? (
@@ -269,14 +270,14 @@ export const ServicesView: React.FC = () => {
                       <Server className="w-5 h-5" />
                     </div>
 
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-bold text-slate-100 tracking-tight">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-sm font-bold text-slate-100 tracking-tight truncate" title={svc.name}>
                           {svc.name}
                         </span>
                         <StatusBadge status={svc.status} size="sm" />
                       </div>
-                      <div className="flex items-center gap-2 mt-1 text-xs font-mono text-slate-400">
+                      <div className="flex items-center gap-2 mt-1 text-xs font-mono text-slate-400 md:whitespace-nowrap">
                         <span>ns: {svc.namespace}</span>
                         <span>•</span>
                         <span className="text-slate-300">
@@ -298,13 +299,13 @@ export const ServicesView: React.FC = () => {
                       </span>
                       <span
                         className={`text-sm font-semibold ${
-                          hasRate ? 'text-slate-200' : 'text-slate-500'
+                          hasRate ? 'text-slate-200' : 'text-slate-400'
                         }`}
                         title={hasRate ? undefined : NO_METRIC_HINT}
                       >
                         {hasRate ? formatRate(svc.rate) : 'no data'}
                         {hasRate && svc.rateSource && (
-                          <span className="ml-1 text-[9px] text-slate-500">{sourceLabel(svc.rateSource)}</span>
+                          <span className="ml-1 text-[9px] text-slate-400">{sourceLabel(svc.rateSource)}</span>
                         )}
                       </span>
                     </div>
@@ -316,7 +317,7 @@ export const ServicesView: React.FC = () => {
                       <span
                         className={`text-sm font-semibold ${
                           !hasMeasuredRate
-                            ? 'text-slate-500'
+                            ? 'text-slate-400'
                             : hasErrors
                               ? 'text-rose-400'
                               : 'text-slate-300'
@@ -334,7 +335,7 @@ export const ServicesView: React.FC = () => {
                       <span
                         className={`text-sm font-semibold ${
                           !hasLatency
-                            ? 'text-slate-500'
+                            ? 'text-slate-400'
                             : isHighLatency
                               ? 'text-amber-400'
                               : 'text-slate-200'
@@ -343,7 +344,7 @@ export const ServicesView: React.FC = () => {
                       >
                         {hasLatency ? formatMs(svc.latencyP95 * 1000) : 'no data'}
                         {hasLatency && svc.latencySource && (
-                          <span className="ml-1 text-[9px] text-slate-500">{sourceLabel(svc.latencySource)}</span>
+                          <span className="ml-1 text-[9px] text-slate-400">{sourceLabel(svc.latencySource)}</span>
                         )}
                       </span>
                     </div>
@@ -356,7 +357,7 @@ export const ServicesView: React.FC = () => {
                       className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-300 hover:text-white transition"
                       title="View BadgerDB Historical Baselines"
                     >
-                      <Database className="w-3.5 h-3.5 text-indigo-400" />
+                      <Database className="w-3.5 h-3.5 text-cyan-400" />
                       <span>Baselines</span>
                     </button>
 

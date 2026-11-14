@@ -67,20 +67,9 @@ func extractServiceFromAddress(addr string) string {
 	return addr
 }
 
-func extractServiceName(podName string) string {
-	parts := strings.Split(podName, "-")
-	if len(parts) >= 3 {
-		return strings.Join(parts[:len(parts)-2], "-")
-	}
-	if len(parts) == 2 {
-		return parts[0]
-	}
-	return podName
-}
-
 func isSystemWorkload(name string) bool {
 	switch name {
-	case "coredns", "kube-dns", "beyla", "tempo", "prometheus", "loki", "fluent-bit", "opentelemetry-operator":
+	case "coredns", "kube-dns", "obi", "tempo", "prometheus", "loki", "fluent-bit", "opentelemetry-operator":
 		return true
 	}
 	return false

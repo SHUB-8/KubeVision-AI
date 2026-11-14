@@ -26,14 +26,14 @@
 ### Collection Layer
 | Collector | What | How |
 |-----------|------|-----|
-| Grafana Beyla | Endpoint metrics, protocol stats, service graph, distributed traces (OTLP) | eBPF DaemonSet |
+| OpenTelemetry eBPF Instrumentation (OBI) | Endpoint metrics, protocol stats, service graph, distributed traces (OTLP) | eBPF DaemonSet |
 | Fluent Bit | Pod logs with K8s metadata labels | DaemonSet |
 | Kube-state-metrics | K8s object states (Pods, PV/PVC, Nodes, Events) | Deployment |
 
 ### Evidence Layer (Polyglot Storage)
 | Store | Data |
 |-------|------|
-| Prometheus | Metrics from Beyla (latency, error rate, throughput), K8s objects (PV/PVC, Pods), and protocol stats. |
+| Prometheus | Metrics from OBI (latency, error rate, throughput), K8s objects (PV/PVC, Pods), and protocol stats. |
 | Loki | Searchable pod logs with indexed K8s metadata. |
 | Grafana Tempo | Distributed traces (OTLP), spans, per-hop latency, and protocol details. |
 | BadgerDB | System configuration, anomaly events, RCA reports,  forecasts and historical baseline stats (embedded in Go backend). |
@@ -69,7 +69,7 @@
 
 | Layer | Technology | Language |
 |-------|-----------|----------|
-| Collection | Grafana Beyla (eBPF) | Go |
+| Collection | OpenTelemetry eBPF Instrumentation (OBI) | Go |
 | Logs | Fluent Bit → Loki | C / Go |
 | Metrics | Prometheus | Go |
 | Traces | Grafana Tempo | Go |

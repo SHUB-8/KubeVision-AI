@@ -9,6 +9,8 @@ import {
   ClusterInfo,
   UISettings,
   Baseline,
+  TraceLogs,
+  LogVolumeBucket,
 } from '../types/api';
 
 const BASE_URL = '/api/v1';
@@ -95,11 +97,21 @@ export const api = {
     return handleResponse<{ status: string; message: string }>(res);
   },
 
-  async getTraces(serviceName?: string, limit: number = 25, window?: string): Promise<Trace[]> {
+  async getTraces(
+    serviceName?: string,
+    limit: number = 25,
+    window?: string,
+    status?: string,
+    minDurationMs?: number
+  ): Promise<Trace[]> {
     const params = new URLSearchParams();
     if (serviceName) params.set('serviceName', serviceName);
     params.set('limit', limit.toString());
     if (window) params.set('window', window);
+    if (status) params.set('status', status);
+    if (minDurationMs && minDurationMs > 0) {
+      params.set('minDuration', `${minDurationMs}ms`);
+    }
     const res = await fetch(`${BASE_URL}/traces?${params.toString()}`);
     return handleResponse<Trace[]>(res).then((d) => d ?? []);
   },
@@ -107,6 +119,11 @@ export const api = {
   async getTraceDetail(traceId: string): Promise<Trace> {
     const res = await fetch(`${BASE_URL}/traces/${encodeURIComponent(traceId)}`);
     return handleResponse<Trace>(res);
+  },
+
+  async getTraceLogs(traceId: string): Promise<TraceLogs> {
+    const res = await fetch(`${BASE_URL}/traces/${encodeURIComponent(traceId)}/logs`);
+    return handleResponse<TraceLogs>(res);
   },
 
   async getLogs(params: {
@@ -127,6 +144,28 @@ export const api = {
 
     const res = await fetch(`${BASE_URL}/logs?${query.toString()}`);
     return handleResponse<LogEntry[]>(res).then((d) => d ?? []);
+  },
+
+  async getLogVolume(params: {
+    namespace?: string;
+    service?: string;
+    pod?: string;
+    window?: string;
+    start?: number;
+    end?: number;
+    step?: string;
+  }): Promise<LogVolumeBucket[]> {
+    const query = new URLSearchParams();
+    if (params.namespace) query.set('namespace', params.namespace);
+    if (params.service) query.set('service', params.service);
+    if (params.pod) query.set('pod', params.pod);
+    if (params.window) query.set('window', params.window);
+    if (params.start) query.set('start', params.start.toString());
+    if (params.end) query.set('end', params.end.toString());
+    if (params.step) query.set('step', params.step);
+
+    const res = await fetch(`${BASE_URL}/logs/volume?${query.toString()}`);
+    return handleResponse<LogVolumeBucket[]>(res).then((d) => d ?? []);
   },
 
   async getConfig(): Promise<UISettings> {

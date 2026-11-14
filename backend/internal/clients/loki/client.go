@@ -122,6 +122,33 @@ func (c *Client) QueryRange(ctx context.Context, logQL string, start, end string
 	return entries, nil
 }
 
+// BuildLogQLForServices selects the pods of several services in one query.
+// A failing call is frequently logged by the callee rather than the service the
+// user navigated from, so trace-scoped log lookups must span every participant.
+func BuildLogQLForServices(namespace string, services []string, filter string) string {
+	selectors := fmt.Sprintf(`kubernetes_namespace_name=%s`, strconv.Quote(namespace))
+	patterns := make([]string, 0, len(services))
+	for _, service := range services {
+		service = strings.TrimSpace(service)
+		if service == "" {
+			continue
+		}
+		patterns = append(patterns, regexp.QuoteMeta(service)+"($|[-.]).*")
+	}
+	if len(patterns) > 0 {
+		selectors += fmt.Sprintf(`, kubernetes_pod_name=~%s`, strconv.Quote("("+strings.Join(patterns, "|")+")"))
+	}
+	query := fmt.Sprintf(`{%s}`, selectors)
+	if filter != "" {
+		f := filter
+		if !strings.HasPrefix(f, "(?") {
+			f = "(?i)" + f
+		}
+		query += fmt.Sprintf(` |~ %s`, strconv.Quote(f))
+	}
+	return query
+}
+
 func BuildLogQL(namespace, pod, filter string) string {
 	// Label keys produced by Fluent Bit's Loki output Label_Keys
 	// $kubernetes['...'] accessors: fluent-bit prefixes nested record keys
@@ -139,7 +166,11 @@ func BuildLogQL(namespace, pod, filter string) string {
 	}
 	query := fmt.Sprintf(`{%s}`, selectors)
 	if filter != "" {
-		query += fmt.Sprintf(` |~ %s`, strconv.Quote(filter))
+		f := filter
+		if !strings.HasPrefix(f, "(?") {
+			f = "(?i)" + f
+		}
+		query += fmt.Sprintf(` |~ %s`, strconv.Quote(f))
 	}
 	return query
 }
@@ -178,4 +209,113 @@ func normalizeLogLine(line string) string {
 		}
 	}
 	return line
+}
+
+type lokiMatrixResponse struct {
+	Status string `json:"status"`
+	Data   struct {
+		ResultType string `json:"resultType"`
+		Result     []struct {
+			Metric map[string]string `json:"metric"`
+			Values [][]interface{}   `json:"values"`
+		} `json:"result"`
+	} `json:"data"`
+}
+
+// GetLogVolume returns log entry volume and error counts bucketed over time across a time window.
+func (c *Client) GetLogVolume(ctx context.Context, namespace, service string, startSec, endSec int64, step string) ([]models.LogVolumeBucket, error) {
+	if step == "" {
+		span := endSec - startSec
+		if span <= 300 {
+			step = "15s"
+		} else if span <= 1800 {
+			step = "30s"
+		} else if span <= 7200 {
+			step = "1m"
+		} else {
+			step = "5m"
+		}
+	}
+
+	baseSelector := BuildLogQL(namespace, service, "")
+	totalLogQL := fmt.Sprintf("sum(count_over_time(%s[%s]))", baseSelector, step)
+	errorLogQL := fmt.Sprintf("sum(count_over_time(%s |~ \"(?i)(error|fatal|panic|exception)\" [%s]))", baseSelector, step)
+
+	startStr := fmt.Sprintf("%d000000000", startSec)
+	endStr := fmt.Sprintf("%d000000000", endSec)
+
+	queryMatrix := func(query string) (map[int64]int64, error) {
+		params := url.Values{}
+		params.Set("query", query)
+		params.Set("start", startStr)
+		params.Set("end", endStr)
+		params.Set("step", step)
+
+		u := fmt.Sprintf("%s/loki/api/v1/query_range?%s", c.baseURL, params.Encode())
+		req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		var matrixResp lokiMatrixResponse
+		if err := json.Unmarshal(body, &matrixResp); err != nil {
+			return nil, err
+		}
+		counts := make(map[int64]int64)
+		for _, s := range matrixResp.Data.Result {
+			for _, pt := range s.Values {
+				if len(pt) >= 2 {
+					ts := int64(0)
+					switch v := pt[0].(type) {
+					case float64:
+						ts = int64(v)
+					case string:
+						ts, _ = strconv.ParseInt(v, 10, 64)
+					}
+					cnt := int64(0)
+					switch v := pt[1].(type) {
+					case float64:
+						cnt = int64(v)
+					case string:
+						cnt, _ = strconv.ParseInt(v, 10, 64)
+					}
+					if ts > 0 {
+						counts[ts] += cnt
+					}
+				}
+			}
+		}
+		return counts, nil
+	}
+
+	totalCounts, err := queryMatrix(totalLogQL)
+	if err != nil {
+		slog.Warn("failed to query total log volume", "error", err)
+		return []models.LogVolumeBucket{}, nil
+	}
+	errorCounts, _ := queryMatrix(errorLogQL)
+
+	var timestamps []int64
+	for ts := range totalCounts {
+		timestamps = append(timestamps, ts)
+	}
+	sort.Slice(timestamps, func(i, j int) bool { return timestamps[i] < timestamps[j] })
+
+	buckets := make([]models.LogVolumeBucket, len(timestamps))
+	for i, ts := range timestamps {
+		buckets[i] = models.LogVolumeBucket{
+			Timestamp: ts,
+			Total:     totalCounts[ts],
+			Errors:    errorCounts[ts],
+		}
+	}
+	return buckets, nil
 }

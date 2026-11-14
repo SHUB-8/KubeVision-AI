@@ -12,6 +12,8 @@ import (
 
 const DefaultRetentionTTL = 7 * 24 * time.Hour
 
+var ErrStopIteration = errors.New("stop iteration")
+
 type Store struct {
 	db *badger.DB
 }
@@ -120,6 +122,29 @@ func (s *Store) List(prefix string) (map[string][]byte, error) {
 				return nil
 			})
 			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// IterateValues iterates over items matching prefix, passing each item's value to fn.
+// If fn returns an error or ErrStopIteration, iteration stops early.
+func (s *Store) IterateValues(prefix string, fn func(val []byte) error) error {
+	prefixBytes := []byte(prefix)
+	return s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefixBytes
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			err := item.Value(fn)
+			if err != nil {
+				if errors.Is(err, ErrStopIteration) {
+					return nil
+				}
 				return err
 			}
 		}

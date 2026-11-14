@@ -8,8 +8,8 @@ grafana:
 
 prometheus:
   prometheusSpec:
-    # Pick up ServiceMonitors regardless of their release label (Beyla's raw
-    # manifest doesn't, and shouldn't have to, carry the helm release label)
+    # Pick up ServiceMonitors regardless of their release label: the OBI
+    # manifests are raw YAML, not part of this Helm release
     serviceMonitorSelectorNilUsesHelmValues: false
     # Disk caps (docs/architecture.md defaults). retentionSize is the hard
     # cap; without it Prometheus grows unbounded on the node disk until its

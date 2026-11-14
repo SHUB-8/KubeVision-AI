@@ -1,4 +1,4 @@
-import type { Trace } from '../types/api';
+import type { Span, Trace } from '../types/api';
 
 /**
  * Tempo's search response carries a trace-level duration, but the backend only
@@ -27,6 +27,34 @@ export function traceDurationMs(trace: Trace): number | null {
 /** Number of spans actually attached to a search result. */
 export function traceSpanCount(trace: Trace): number {
   return trace.spanCount ?? trace.spans?.length ?? 0;
+}
+
+/**
+ * True when one span recorded a failure — via OTLP status or failure
+ * attributes (HTTP 5xx, gRPC non-OK, error=true). Shared by the trace list's
+ * error dot and by cascade attribution, so both agree on what "failing" means.
+ */
+export function isFailingSpan(span: Span): boolean {
+  if (
+    span.statusCode &&
+    span.statusCode !== 'STATUS_CODE_UNSET' &&
+    span.statusCode !== '0' &&
+    !span.statusCode.includes('OK')
+  ) {
+    return true;
+  }
+  const attrs = span.attributes || {};
+  if (attrs['error'] === 'true' || attrs['error.type']) return true;
+  const httpStatus = parseInt(attrs['http.status_code'] || attrs['http.response.status_code'] || '0', 10);
+  if (httpStatus >= 500) return true;
+  const grpcCode = attrs['rpc.grpc.status_code'] || attrs['rpc.status_code'] || attrs['rpc.response.status_code'];
+  if (grpcCode && grpcCode !== '0' && grpcCode !== 'OK') return true;
+  return false;
+}
+
+/** True when any span in the trace recorded a failure. */
+export function traceHasError(trace: Trace): boolean {
+  return (trace.spans ?? []).some(isFailingSpan);
 }
 
 /**

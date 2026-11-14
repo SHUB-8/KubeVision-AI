@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,13 +29,50 @@ type Client struct {
 	// pods on every request (and every 15s auto-refresh); the List call costs
 	// 100-400ms against the API server. A few seconds of staleness is fine for
 	// dashboards — the /events informer remains the source for event streams.
-	podsMu    sync.Mutex
-	podsCache map[string]podCacheEntry
+	podsMu     sync.Mutex
+	podsCache  map[string]podCacheEntry
+	podsFlight podSingleflight
 }
 
 type podCacheEntry struct {
 	pods    []models.PodInfo
 	expires time.Time
+}
+
+type podFlightCall struct {
+	wg  sync.WaitGroup
+	val []models.PodInfo
+	err error
+}
+
+type podSingleflight struct {
+	mu sync.Mutex
+	m  map[string]*podFlightCall
+}
+
+func (g *podSingleflight) Do(key string, fn func() ([]models.PodInfo, error)) ([]models.PodInfo, error) {
+	g.mu.Lock()
+	if g.m == nil {
+		g.m = make(map[string]*podFlightCall)
+	}
+	if c, ok := g.m[key]; ok {
+		g.mu.Unlock()
+		c.wg.Wait()
+		return c.val, c.err
+	}
+	c := new(podFlightCall)
+	c.wg.Add(1)
+	g.m[key] = c
+	g.mu.Unlock()
+
+	c.val, c.err = fn()
+	c.wg.Done()
+
+	g.mu.Lock()
+	delete(g.m, key)
+	g.mu.Unlock()
+
+	return c.val, c.err
 }
 
 // Just under the 15s auto-refresh so a scheduled refresh mostly reads cache;
@@ -62,53 +100,67 @@ func NewClient(clusterName string) (*Client, error) {
 	return &Client{clientset: clientset, clusterName: clusterName, podsCache: make(map[string]podCacheEntry)}, nil
 }
 
-func (c *Client) ctx() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), 15*time.Second)
+func (c *Client) ctx(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, 15*time.Second)
 }
 
-func (c *Client) GetPods(namespace string) ([]models.PodInfo, error) {
-	// Single-flight: the check, the API list and the store all happen under
-	// one lock, so concurrent requests during a miss WAIT for the fresh list
-	// instead of stampeding the API server (k3s throttles at ~1.3s per list
-	// on this host — two simultaneous misses used to cost 2x that).
+func (c *Client) GetPods(ctx context.Context, namespace string) ([]models.PodInfo, error) {
 	c.podsMu.Lock()
-	defer c.podsMu.Unlock()
-
 	if entry, ok := c.podsCache[namespace]; ok && time.Now().Before(entry.expires) {
-		return entry.pods, nil
+		pods := append([]models.PodInfo(nil), entry.pods...)
+		c.podsMu.Unlock()
+		return pods, nil
 	}
+	c.podsMu.Unlock()
 
-	ctx, cancel := c.ctx()
-	defer cancel()
-
-	list, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to list pods: %w", err)
-	}
-
-	pods := make([]models.PodInfo, 0, len(list.Items))
-	for _, p := range list.Items {
-		var restarts int32
-		for _, cs := range p.Status.ContainerStatuses {
-			restarts += cs.RestartCount
+	return c.podsFlight.Do(namespace, func() ([]models.PodInfo, error) {
+		c.podsMu.Lock()
+		if entry, ok := c.podsCache[namespace]; ok && time.Now().Before(entry.expires) {
+			pods := append([]models.PodInfo(nil), entry.pods...)
+			c.podsMu.Unlock()
+			return pods, nil
 		}
-		pods = append(pods, models.PodInfo{
-			Name:         p.Name,
-			Namespace:    p.Namespace,
-			Status:       string(p.Status.Phase),
-			Node:         p.Spec.NodeName,
-			IP:           p.Status.PodIP,
-			Restart:      restarts,
-			Age:          p.CreationTimestamp.Format(time.RFC3339),
-			WorkloadName: ExtractWorkloadName(p),
-		})
-	}
-	c.podsCache[namespace] = podCacheEntry{pods: pods, expires: time.Now().Add(podsCacheTTL)}
-	return pods, nil
+		c.podsMu.Unlock()
+
+		listCtx, cancel := c.ctx(ctx)
+		defer cancel()
+
+		list, err := c.clientset.CoreV1().Pods(namespace).List(listCtx, metav1.ListOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("failed to list pods: %w", err)
+		}
+
+		pods := make([]models.PodInfo, 0, len(list.Items))
+		for i := range list.Items {
+			p := &list.Items[i]
+			var restarts int32
+			for _, cs := range p.Status.ContainerStatuses {
+				restarts += cs.RestartCount
+			}
+			pods = append(pods, models.PodInfo{
+				Name:         p.Name,
+				Namespace:    p.Namespace,
+				Status:       string(p.Status.Phase),
+				Node:         p.Spec.NodeName,
+				IP:           p.Status.PodIP,
+				Restart:      restarts,
+				Age:          p.CreationTimestamp.Format(time.RFC3339),
+				WorkloadName: ExtractWorkloadName(p),
+			})
+		}
+		c.podsMu.Lock()
+		c.podsCache[namespace] = podCacheEntry{pods: pods, expires: time.Now().Add(podsCacheTTL)}
+		c.podsMu.Unlock()
+
+		return append([]models.PodInfo(nil), pods...), nil
+	})
 }
 
-func (c *Client) GetClusterInfo() (*models.ClusterInfo, error) {
-	ctx, cancel := c.ctx()
+func (c *Client) GetClusterInfo(ctx context.Context) (*models.ClusterInfo, error) {
+	reqCtx, cancel := c.ctx(ctx)
 	defer cancel()
 
 	version, err := c.clientset.Discovery().ServerVersion()
@@ -116,7 +168,7 @@ func (c *Client) GetClusterInfo() (*models.ClusterInfo, error) {
 		return nil, fmt.Errorf("failed to get server version: %w", err)
 	}
 
-	nodes, err := c.clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	nodes, err := c.clientset.CoreV1().Nodes().List(reqCtx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list nodes: %w", err)
 	}
@@ -143,11 +195,11 @@ func (c *Client) GetClusterInfo() (*models.ClusterInfo, error) {
 	}, nil
 }
 
-func (c *Client) GetNamespaces() ([]string, error) {
-	ctx, cancel := c.ctx()
+func (c *Client) GetNamespaces(ctx context.Context) ([]string, error) {
+	reqCtx, cancel := c.ctx(ctx)
 	defer cancel()
 
-	list, err := c.clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	list, err := c.clientset.CoreV1().Namespaces().List(reqCtx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list namespaces: %w", err)
 	}
@@ -269,11 +321,11 @@ func EventRecord(event *corev1.Event) models.KubernetesEvent {
 	}
 }
 
-func (c *Client) GetServiceClusterIPs(namespace string) (map[string]string, error) {
-	ctx, cancel := c.ctx()
+func (c *Client) GetServiceClusterIPs(ctx context.Context, namespace string) (map[string]string, error) {
+	reqCtx, cancel := c.ctx(ctx)
 	defer cancel()
 
-	list, err := c.clientset.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{})
+	list, err := c.clientset.CoreV1().Services(namespace).List(reqCtx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list services: %w", err)
 	}
@@ -287,17 +339,18 @@ func (c *Client) GetServiceClusterIPs(namespace string) (map[string]string, erro
 	return ipToService, nil
 }
 
-func (c *Client) GetPodIPs(namespace string) (map[string]string, error) {
-	ctx, cancel := c.ctx()
+func (c *Client) GetPodIPs(ctx context.Context, namespace string) (map[string]string, error) {
+	reqCtx, cancel := c.ctx(ctx)
 	defer cancel()
 
-	list, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	list, err := c.clientset.CoreV1().Pods(namespace).List(reqCtx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pods for ip mapping: %w", err)
 	}
 
 	ipMap := make(map[string]string)
-	for _, pod := range list.Items {
+	for i := range list.Items {
+		pod := &list.Items[i]
 		if pod.Status.PodIP != "" {
 			ipMap[pod.Status.PodIP] = ExtractWorkloadName(pod)
 		}
@@ -307,11 +360,11 @@ func (c *Client) GetPodIPs(namespace string) (map[string]string, error) {
 
 // GetDeclaredServiceEndpoints dynamically inspects the Kubernetes Service spec for any namespace and service,
 // returning declared ports and protocols without any hardcoded service names.
-func (c *Client) GetDeclaredServiceEndpoints(namespace, serviceName string) ([]models.Endpoint, error) {
-	ctx, cancel := c.ctx()
+func (c *Client) GetDeclaredServiceEndpoints(ctx context.Context, namespace, serviceName string) ([]models.Endpoint, error) {
+	reqCtx, cancel := c.ctx(ctx)
 	defer cancel()
 
-	svc, err := c.clientset.CoreV1().Services(namespace).Get(ctx, serviceName, metav1.GetOptions{})
+	svc, err := c.clientset.CoreV1().Services(namespace).Get(reqCtx, serviceName, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -332,11 +385,11 @@ func (c *Client) GetDeclaredServiceEndpoints(namespace, serviceName string) ([]m
 	return endpoints, nil
 }
 
-func (c *Client) GetServicePortProtocols(namespace string) (map[string]string, error) {
-	ctx, cancel := c.ctx()
+func (c *Client) GetServicePortProtocols(ctx context.Context, namespace string) (map[string]string, error) {
+	reqCtx, cancel := c.ctx(ctx)
 	defer cancel()
 
-	list, err := c.clientset.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{})
+	list, err := c.clientset.CoreV1().Services(namespace).List(reqCtx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list services: %w", err)
 	}
@@ -360,6 +413,50 @@ func (c *Client) GetServicePortProtocols(namespace string) (map[string]string, e
 		protocols[svc.Name] = proto
 	}
 	return protocols, nil
+}
+
+func (c *Client) GetPersistentVolumeClaims(ctx context.Context, namespace string) ([]models.PVCInfo, error) {
+	if c.clientset == nil {
+		return nil, nil
+	}
+	reqCtx, cancel := c.ctx(ctx)
+	defer cancel()
+
+	list, err := c.clientset.CoreV1().PersistentVolumeClaims(namespace).List(reqCtx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list persistent volume claims: %w", err)
+	}
+
+	pvcs := make([]models.PVCInfo, 0, len(list.Items))
+	for _, item := range list.Items {
+		capStr := ""
+		if qty, ok := item.Status.Capacity[corev1.ResourceStorage]; ok {
+			capStr = qty.String()
+		} else if qty, ok := item.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
+			capStr = qty.String()
+		}
+		var modes []string
+		for _, m := range item.Spec.AccessModes {
+			modes = append(modes, string(m))
+		}
+		storageClass := ""
+		if item.Spec.StorageClassName != nil {
+			storageClass = *item.Spec.StorageClassName
+		}
+		age := time.Since(item.CreationTimestamp.Time).Round(time.Second).String()
+
+		pvcs = append(pvcs, models.PVCInfo{
+			Name:         item.Name,
+			Namespace:    item.Namespace,
+			Status:       string(item.Status.Phase),
+			VolumeName:   item.Spec.VolumeName,
+			Capacity:     capStr,
+			StorageClass: storageClass,
+			AccessModes:  modes,
+			Age:          age,
+		})
+	}
+	return pvcs, nil
 }
 
 // DetectProtocolFromPort evaluates appProtocol, port name, and port number
@@ -450,8 +547,29 @@ func DetectProtocolFromPort(name string, appProtocol *string, port int32) string
 	return "TCP"
 }
 
+// ExtractServiceName derives the base service/workload name from a pod name.
+func ExtractServiceName(podName string) string {
+	parts := strings.Split(podName, "-")
+	if len(parts) >= 2 {
+		// If last part is numeric (e.g., StatefulSet pod "redis-cart-0"), strip only the index
+		if _, err := strconv.Atoi(parts[len(parts)-1]); err == nil {
+			return strings.Join(parts[:len(parts)-1], "-")
+		}
+	}
+	if len(parts) >= 3 {
+		return strings.Join(parts[:len(parts)-2], "-")
+	}
+	if len(parts) == 2 {
+		return parts[0]
+	}
+	return podName
+}
+
 // ExtractWorkloadName resolves the top-level owner or app name for a pod.
-func ExtractWorkloadName(pod corev1.Pod) string {
+func ExtractWorkloadName(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
 	if name, ok := pod.Labels["app.kubernetes.io/name"]; ok && name != "" {
 		return name
 	}
@@ -475,9 +593,5 @@ func ExtractWorkloadName(pod corev1.Pod) string {
 		}
 	}
 
-	parts := strings.Split(pod.Name, "-")
-	if len(parts) >= 3 {
-		return strings.Join(parts[:len(parts)-2], "-")
-	}
-	return pod.Name
+	return ExtractServiceName(pod.Name)
 }

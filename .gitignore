@@ -16,7 +16,7 @@ data/
 # Vendored chart/source snapshots used for one-off upgrades
 .kps-chart/
 .fb-chart/
-.beyla-src/
+.obi-src/
 .tempo-src/
 *.tgz
 

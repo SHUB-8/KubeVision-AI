@@ -1,14 +1,21 @@
 import React, { useState, useMemo, useRef, useCallback } from 'react';
 import { Trace, Span } from '../../types/api';
 import { SpanDetail } from './SpanDetail';
+import { TraceLogsPanel } from './TraceLogsPanel';
+import { TraceFlameGraph } from './TraceFlameGraph';
 import { formatNs, formatAge } from '../../lib/format';
-import { traceStartNs } from '../../lib/trace';
+import { serviceStep } from '../../lib/serviceColor';
+import { traceStartNs, isFailingSpan } from '../../lib/trace';
+import { analyzeCascade } from '../../lib/cascade';
 import {
   ArrowLeft,
   Copy,
   Check,
   ChevronRight,
   ChevronDown,
+  Terminal,
+  Flame,
+  AlertTriangle,
 } from 'lucide-react';
 
 interface TraceWaterfallProps {
@@ -16,32 +23,37 @@ interface TraceWaterfallProps {
   onBack: () => void;
 }
 
-const PALETTE = [
-  { bg: 'bg-cyan-500/10', border: 'border-cyan-500/30', bar: 'bg-cyan-500', text: 'text-cyan-400' },
-  { bg: 'bg-indigo-500/10', border: 'border-indigo-500/30', bar: 'bg-indigo-500', text: 'text-indigo-400' },
-  { bg: 'bg-emerald-500/10', border: 'border-emerald-500/30', bar: 'bg-emerald-500', text: 'text-emerald-400' },
-  { bg: 'bg-amber-500/10', border: 'border-amber-500/30', bar: 'bg-amber-500', text: 'text-amber-400' },
-  { bg: 'bg-purple-500/10', border: 'border-purple-500/30', bar: 'bg-purple-500', text: 'text-purple-400' },
-  { bg: 'bg-sky-500/10', border: 'border-sky-500/30', bar: 'bg-sky-500', text: 'text-sky-400' },
-  { bg: 'bg-rose-500/10', border: 'border-rose-500/30', bar: 'bg-rose-500', text: 'text-rose-400' },
-  { bg: 'bg-teal-500/10', border: 'border-teal-500/30', bar: 'bg-teal-500', text: 'text-teal-400' },
-  { bg: 'bg-fuchsia-500/10', border: 'border-fuchsia-500/30', bar: 'bg-fuchsia-500', text: 'text-fuchsia-400' },
-  { bg: 'bg-orange-500/10', border: 'border-orange-500/30', bar: 'bg-orange-500', text: 'text-orange-400' },
-  { bg: 'bg-blue-500/10', border: 'border-blue-500/30', bar: 'bg-blue-500', text: 'text-blue-400' },
-  { bg: 'bg-lime-500/10', border: 'border-lime-500/30', bar: 'bg-lime-500', text: 'text-lime-400' },
-  { bg: 'bg-pink-500/10', border: 'border-pink-500/30', bar: 'bg-pink-500', text: 'text-pink-400' },
-  { bg: 'bg-violet-500/10', border: 'border-violet-500/30', bar: 'bg-violet-500', text: 'text-violet-400' },
+// Service identity is an ordinal step in one hue, not a categorical color:
+// a service keeps its step in the rows and the minimap, and the ramp cannot be
+// mistaken for a status (those stay rose/amber/emerald). Class names are
+// literal strings so Tailwind's JIT can see every utility it must emit.
+//
+// The step is free to get dark for the *fill* (a 14px bar needs no text
+// contrast), but the 10px chip label must stay readable: steps 5-8 drop below
+// 4.5:1 on paper, so their label is pinned to step 4 while the chip's fill and
+// border keep the service's real step.
+const SERVICE_STEPS = [
+  { bar: 'bg-seq-1', chip: 'bg-seq-1/10 border-seq-1/40 text-seq-1' },
+  { bar: 'bg-seq-2', chip: 'bg-seq-2/10 border-seq-2/40 text-seq-2' },
+  { bar: 'bg-seq-3', chip: 'bg-seq-3/10 border-seq-3/40 text-seq-3' },
+  { bar: 'bg-seq-4', chip: 'bg-seq-4/10 border-seq-4/40 text-seq-4' },
+  { bar: 'bg-seq-5', chip: 'bg-seq-5/10 border-seq-5/40 text-seq-4' },
+  { bar: 'bg-seq-6', chip: 'bg-seq-6/10 border-seq-6/40 text-seq-4' },
+  { bar: 'bg-seq-7', chip: 'bg-seq-7/10 border-seq-7/40 text-seq-4' },
+  { bar: 'bg-seq-8', chip: 'bg-seq-8/10 border-seq-8/40 text-seq-4' },
 ];
 
+// No service name means no identity to encode — stay neutral rather than
+// assigning a step that would imply a real service.
+const NEUTRAL_STEP = {
+  bar: 'bg-slate-400',
+  chip: 'bg-slate-500/10 border-slate-500/30 text-slate-300',
+};
+
 function getServiceColor(name: string) {
-  if (!name) return { bg: 'bg-slate-500/10', border: 'border-slate-500/30', bar: 'bg-slate-400', text: 'text-slate-300' };
-  let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = ((hash << 5) - hash) + name.charCodeAt(i);
-    hash |= 0;
-  }
-  const index = Math.abs(hash) % PALETTE.length;
-  return PALETTE[index];
+  // Shared with the flame graph, so a service keeps its step across layouts.
+  const step = serviceStep(name);
+  return step === 0 ? NEUTRAL_STEP : SERVICE_STEPS[step - 1];
 }
 
 /** A visible [start, end] window over the trace, as fractions of the full duration. */
@@ -59,6 +71,8 @@ const axisLabel = (ms: number) => `${ms < 10 ? ms.toFixed(1) : Math.round(ms)} m
 export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack }) => {
   const [selectedSpan, setSelectedSpan] = useState<Span | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showRelatedLogs, setShowRelatedLogs] = useState(false);
+  const [traceLayout, setTraceLayout] = useState<'waterfall' | 'flamegraph'>('waterfall');
   const [view, setView] = useState<ViewRange | null>(null);
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
 
@@ -76,16 +90,16 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
   };
 
   // Build parent-child tree hierarchy, chronological DFS ordering & Clock Skew Adjustment
-  const { hierarchicalSpans, minStart, maxEnd, totalDurationNs, rawWindowNs, childrenCount } = useMemo(() => {
+  const { hierarchicalSpans, minStart, totalDurationNs, rawWindowNs, childrenCount, rootSpan } = useMemo(() => {
     const spans = trace.spans ?? [];
     if (spans.length === 0) {
       return {
         hierarchicalSpans: [] as { span: Span; depth: number; adjustedStartTime: number; adjustedDuration: number }[],
         minStart: 0,
-        maxEnd: 1,
         totalDurationNs: 1,
         rawWindowNs: 1,
         childrenCount: new Map<string, number>(),
+        rootSpan: null as Span | null,
       };
     }
 
@@ -137,8 +151,7 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
     function dfs(
       current: Span,
       depth: number,
-      parentStart?: number,
-      parentEnd?: number
+      parentStart?: number
     ) {
       if (visited.has(current.spanId)) return;
       visited.add(current.spanId);
@@ -169,7 +182,7 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
 
       const children = childrenMap.get(current.spanId) || [];
       for (const child of children) {
-        dfs(child, depth + 1, adjStart, adjStart + adjDur);
+        dfs(child, depth + 1, adjStart);
       }
     }
 
@@ -209,6 +222,9 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
       totalDurationNs: diff,
       rawWindowNs,
       childrenCount: counts,
+      // First root in start order: the detail API omits the trace-level names,
+      // so the header falls back to what the root span itself recorded.
+      rootSpan: roots[0] ?? null,
     };
   }, [trace]);
 
@@ -239,6 +255,15 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
   // outlive their callers by seconds and that time is real.
   const totalDurationMs = (rawWindowNs / 1_000_000).toFixed(1);
   const startNs = traceStartNs(trace);
+  // Cascading failures: which span recorded the failure, and which spans only
+  // inherited it. Shared with the flame graph so both views agree.
+  const cascade = useMemo(() => analyzeCascade(trace), [trace]);
+  const cascadeOrigin = cascade.origin;
+  // The detail API returns spans only, so the trace-level names are often
+  // absent; fall back to what the root span recorded before showing a bare
+  // "Trace" title with no service chip.
+  const detailTitle = trace.rootTraceName || rootSpan?.operationName || 'Trace';
+  const detailService = trace.rootServiceName || rootSpan?.serviceName;
   const eff = view ?? FULL_VIEW;
   const viewDenom = eff.end - eff.start;
   const windowMs = viewDenom * totalDurationNs / 1_000_000;
@@ -298,11 +323,11 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
           <div>
             <div className="flex items-center gap-2.5 flex-wrap">
               <h2 className="text-base font-bold text-slate-100 tracking-tight">
-                {trace.rootTraceName || trace.rootServiceName || 'Trace'}
+                {detailTitle}
               </h2>
-              {trace.rootServiceName && (
+              {detailService && (
                 <span className="px-2 py-0.5 rounded text-xs font-mono font-semibold bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
-                  {trace.rootServiceName}
+                  {detailService}
                 </span>
               )}
             </div>
@@ -318,6 +343,26 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
                 {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
               </button>
             </div>
+
+            {/* Cascade summary. Logs cannot answer "who caused this": the victim
+                usually returns the failure without logging it. The trace can. */}
+            {cascadeOrigin && cascade.chain.length > 0 && (
+              <button
+                onClick={() => setSelectedSpan(cascadeOrigin)}
+                className="mt-2 inline-flex max-w-full items-center gap-1.5 rounded-sm border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-[10px] font-mono text-rose-300 hover:border-rose-500/50 hover:text-rose-200 transition-colors"
+                title={`${cascade.failingCount} failing span${cascade.failingCount === 1 ? '' : 's'}. Failure recorded on ${cascadeOrigin.serviceName} / ${cascadeOrigin.operationName}${
+                  cascadeOrigin.statusMessage ? ` — ${cascadeOrigin.statusMessage}` : ''
+                }`}
+              >
+                <AlertTriangle className="w-3 h-3 shrink-0" />
+                <span className="truncate">
+                  {cascade.chain.map((step) => step.service).join(' → ')}
+                </span>
+                <span className="shrink-0 text-rose-300/70">
+                  {cascade.failingCount} failing
+                </span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -339,11 +384,52 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
             <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Spans</span>
             <span className="text-base font-bold text-slate-200">{trace.spans?.length || 0}</span>
           </div>
+          {/* View mode toggle: Waterfall vs Flame Graph */}
+          <div className="flex items-center rounded-md border border-slate-700 overflow-hidden">
+            <button
+              onClick={() => setTraceLayout('waterfall')}
+              className={`px-2.5 py-1.5 text-[11px] font-medium transition ${
+                traceLayout === 'waterfall'
+                  ? 'bg-cyan-500/15 text-cyan-300'
+                  : 'bg-slate-800/80 text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Waterfall
+            </button>
+            <button
+              onClick={() => setTraceLayout('flamegraph')}
+              className={`flex items-center gap-1 px-2.5 py-1.5 text-[11px] font-medium transition ${
+                traceLayout === 'flamegraph'
+                  ? 'bg-cyan-500/15 text-cyan-300'
+                  : 'bg-slate-800/80 text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Flame className="w-3 h-3 text-amber-400" />
+              <span>Flame Graph</span>
+            </button>
+          </div>
+
+          <button
+            onClick={() => setShowRelatedLogs(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-[11px] font-medium text-slate-300 hover:text-white transition"
+            title="Logs emitted by every service in this trace, around its time window"
+          >
+            <Terminal className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Related logs</span>
+          </button>
         </div>
       </div>
 
-      {/* Waterfall Gantt Chart Container */}
-      <div className="rounded-md border border-slate-800 bg-slate-900/60 overflow-hidden">
+      {traceLayout === 'flamegraph' ? (
+        <TraceFlameGraph
+          trace={trace}
+          cascade={cascade}
+          selectedSpanId={selectedSpan?.spanId}
+          onSelectSpan={(span) => setSelectedSpan(span)}
+        />
+      ) : (
+        /* Waterfall Gantt Chart Container */
+        <div className="rounded-md border border-slate-800 bg-slate-900/60 overflow-hidden">
         {/* Sticky header: overview strip (drag to zoom / pan) + time axis */}
         <div className="sticky top-0 z-10 bg-slate-900 border-b border-slate-800">
           {/* Overview strip — Jaeger-style: drag window to pan, edges to zoom, double-click to reset */}
@@ -367,7 +453,11 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
                 <div
                   key={span.spanId || idx}
                   className={`absolute rounded-[1px] ${rowH < 2 ? 'opacity-80' : ''} ${
-                    span.statusCode && !span.statusCode.includes('OK') ? 'bg-rose-500' : sColor.bar
+                    isFailingSpan(span)
+                      ? cascade.roles.get(span.spanId) === 'propagated'
+                        ? 'bg-rose-500/40'
+                        : 'bg-rose-500'
+                      : sColor.bar
                   }`}
                   style={{
                     left: `${f0 * 100}%`,
@@ -415,10 +505,14 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
               ))}
             </div>
           </div>
-          <div className="flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-mono text-slate-400 border-t border-slate-800/60">
+          {/* Compact legend: one word plus a tooltip. The long-form explanation
+              belongs in the hover title, not in a sentence across the header. */}
+          <div
+            className="flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-mono text-slate-400 border-t border-slate-800/60"
+            title="Amber marker = value recovered by KubeVision (parent link or RPC method), inferred from the paired span — not observed on the wire."
+          >
             <span className="inline-block w-2 h-2 rounded-full bg-amber-400 shrink-0" />
-            <span className="sm:hidden">inferred — recovered, not observed</span>
-            <span className="hidden sm:inline">amber badge = recovered by KubeVision (link or method), not observed on the wire</span>
+            <span>inferred</span>
           </div>
         </div>
 
@@ -435,7 +529,11 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
               const rightPercent = clamp01((f1 - eff.start) / viewDenom) * 100;
               const widthPercent = rightPercent - leftPercent;
               const sColor = getServiceColor(span.serviceName);
-              const isError = span.statusCode && !span.statusCode.includes('OK');
+              const isError = isFailingSpan(span);
+              // Only the span where the failure started gets full rose; the
+              // spans that inherited it stay visible but subordinate.
+              const errorFill =
+                cascade.roles.get(span.spanId) === 'propagated' ? 'bg-rose-500/40' : 'bg-rose-500';
               const isSelected = selectedSpan?.spanId === span.spanId;
               const nChildren = childrenCount.get(span.spanId) || 0;
               const isCollapsed = collapsedIds.has(span.spanId);
@@ -487,7 +585,7 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
                       />
                     )}
                     <span
-                      className={`text-[10px] px-2 py-0.5 rounded border font-semibold shrink-0 max-w-[75%] truncate sm:max-w-none ${sColor.bg} ${sColor.border} ${sColor.text}`}
+                      className={`text-[10px] px-2 py-0.5 rounded border font-semibold shrink-0 max-w-[75%] truncate sm:max-w-none ${sColor.chip}`}
                       title={span.serviceName}
                     >
                       {span.serviceName}
@@ -537,7 +635,7 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
                           minWidth: 2,
                         }}
                         className={`absolute h-4 rounded-md shadow-sm transition-all duration-150 ${
-                          isError ? 'bg-rose-500' : sColor.bar
+                          isError ? errorFill : sColor.bar
                         } group-hover:brightness-125 opacity-90`}
                       />
                     )}
@@ -568,10 +666,22 @@ export const TraceWaterfall: React.FC<TraceWaterfallProps> = ({ trace, onBack })
           )}
         </div>
       </div>
+      )}
 
       {/* Span Details — right-docked panel so the waterfall stays visible */}
       {selectedSpan && (
-        <SpanDetail span={selectedSpan} onClose={() => setSelectedSpan(null)} />
+        <SpanDetail
+          span={selectedSpan}
+          onClose={() => setSelectedSpan(null)}
+          cascadeRole={cascade.roles.get(selectedSpan.spanId)}
+          origin={cascade.origin}
+          culprit={cascade.culprit}
+          onSelectSpan={(span) => setSelectedSpan(span)}
+        />
+      )}
+
+      {showRelatedLogs && (
+        <TraceLogsPanel traceId={trace.traceId} onClose={() => setShowRelatedLogs(false)} />
       )}
     </div>
   );

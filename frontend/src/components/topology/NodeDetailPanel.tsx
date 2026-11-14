@@ -8,36 +8,52 @@ import {
   Activity,
   GitBranch,
   Terminal,
-  ExternalLink,
-  Layers,
   Clock,
   AlertTriangle,
+  Globe,
 } from 'lucide-react';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 import { languageLabel } from '../common/LanguageBadge';
+import { formatBytesRate, formatRate, formatMs, formatErrorRate } from '../../lib/format';
 
 interface NodeDetailPanelProps {
   serviceName: string;
+  nodeType?: string;
   onClose: () => void;
   /** Runtime language reported by telemetry for this node, when known. */
   language?: string;
   /** Live RED stats of the selected node, for degraded-state actions. */
-  stats?: { errorRate?: number; latencyP95?: number; rate?: number };
+  stats?: { errorRate?: number; latencyP95?: number; rate?: number; bytesRate?: number };
+  /** 'origin' started the cascade, 'inherited' only passed it on. */
+  errorRole?: 'origin' | 'inherited';
+  /** For an inherited service: the downstream service that failed first. */
+  causeName?: string;
+  onFocusCause?: () => void;
 }
 
 export const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
   serviceName,
+  nodeType,
   onClose,
   language,
   stats,
+  errorRole,
+  causeName,
+  onFocusCause,
 }) => {
   const { activeNamespace, timeWindow, setActiveTab, setSelectedService, setLogSeed, setTraceSeed } = useApp();
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
+  const isExternal = nodeType === 'external' || serviceName.includes('outgoing') || serviceName.startsWith('external:');
+
   useEffect(() => {
     let isMounted = true;
+    if (isExternal) {
+      setLoading(false);
+      return;
+    }
     async function loadEndpoints() {
       setLoading(true);
       setError(null);
@@ -54,7 +70,7 @@ export const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [serviceName, activeNamespace, timeWindow]);
+  }, [serviceName, activeNamespace, timeWindow, isExternal]);
 
   const goToTraces = () => {
     setSelectedService(serviceName);
@@ -64,15 +80,23 @@ export const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
   // Degraded-state actions: jump straight to the evidence instead of making
   // the user re-type filters. Thresholds match the row coloring used across
   // the app (>1% errors, >500ms p95).
-  const isDegraded =
-    (stats?.errorRate ?? 0) > 0.01 || (stats?.latencyP95 ?? 0) > 0.5;
+  const hasErrors = (stats?.errorRate ?? 0) > 0;
+  const isSlow = (stats?.latencyP95 ?? 0) > 0.5;
+  const isDegraded = hasErrors || isSlow;
+  const goToFailingTraces = () => {
+    setTraceSeed({ status: 'error' });
+    setSelectedService(serviceName);
+    setActiveTab('traces');
+  };
   const goWithErrorLogs = () => {
     setLogSeed({ keyword: 'error' });
     setSelectedService(serviceName);
     setActiveTab('logs');
   };
   const goWithSlowTraces = () => {
-    setTraceSeed({ minDurationMs: 100 });
+    const p95Ms = (stats?.latencyP95 ?? 0) * 1000;
+    const threshold = p95Ms > 100 ? Math.round(p95Ms * 0.5) : 100;
+    setTraceSeed({ minDurationMs: threshold });
     setSelectedService(serviceName);
     setActiveTab('traces');
   };
@@ -93,14 +117,14 @@ export const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
       <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-800/40">
         <div className="flex items-center gap-2.5 overflow-hidden">
           <div className="p-2 rounded-md bg-cyan-500/10 border border-cyan-500/20 text-cyan-400">
-            <Server className="w-4 h-4" />
+            {isExternal ? <Globe className="w-4 h-4" /> : <Server className="w-4 h-4" />}
           </div>
           <div>
             <h3 className="text-sm font-bold text-slate-100 truncate" title={serviceName}>
-              {serviceName}
+              {isExternal && serviceName === 'outgoing' ? 'outgoing (egress)' : serviceName}
             </h3>
             <p className="text-[11px] font-mono text-slate-400">
-              ns: {activeNamespace}
+              {isExternal ? 'type: external dependency' : `ns: ${activeNamespace}`}
               {language && (
                 <span
                   title={`Runtime language reported by telemetry: ${language}`}
@@ -145,11 +169,33 @@ export const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
         </button>
       </div>
 
+      {/* Live Telemetry Summary */}
+      <div className="grid grid-cols-3 gap-2 px-3 py-2 bg-slate-950/40 border-b border-slate-800 text-[10px] font-mono">
+        <div>
+          <span className="text-slate-400 uppercase block tracking-wider text-[9px]">Inbound</span>
+          <span className="text-slate-200 font-medium">
+            {stats?.rate ? `${stats.rate.toFixed(1)}/s` : '—'}
+          </span>
+        </div>
+        <div>
+          <span className="text-slate-400 uppercase block tracking-wider text-[9px]">P95 Latency</span>
+          <span className={`font-medium ${isSlow ? 'text-amber-400' : 'text-slate-200'}`}>
+            {stats?.latencyP95 ? `${(stats.latencyP95 * 1000).toFixed(1)} ms` : '—'}
+          </span>
+        </div>
+        <div>
+          <span className="text-slate-400 uppercase block tracking-wider text-[9px]">Throughput</span>
+          <span className="text-cyan-300 font-medium">
+            {stats?.bytesRate ? formatBytesRate(stats.bytesRate) : '—'}
+          </span>
+        </div>
+      </div>
+
       {/* Degraded strip: only when the node is actually failing or slow */}
       {isDegraded && (
         <div
           className={`mx-3 mt-3 rounded-md border p-2.5 text-xs space-y-2 ${
-            (stats?.errorRate ?? 0) > 0.01
+            hasErrors
               ? 'border-rose-500/40 bg-rose-500/10 text-rose-200'
               : 'border-amber-500/40 bg-amber-500/10 text-amber-200'
           }`}
@@ -157,93 +203,154 @@ export const NodeDetailPanel: React.FC<NodeDetailPanelProps> = ({
           <div className="flex items-center gap-1.5 font-semibold">
             <AlertTriangle className="w-3.5 h-3.5" />
             <span>
-              {(stats?.errorRate ?? 0) > 0.01
-                ? `Failing: ${((stats?.errorRate ?? 0) * 100).toFixed(1)}% errors`
+              {hasErrors && isSlow
+                ? `Degraded: ${formatErrorRate(stats?.errorRate)} errors, p95 ${((stats?.latencyP95 ?? 0) * 1000).toFixed(0)} ms`
+                : hasErrors
+                ? `Failing: ${formatErrorRate(stats?.errorRate)} errors`
                 : `Slow: p95 ${((stats?.latencyP95 ?? 0) * 1000).toFixed(0)} ms`}
             </span>
           </div>
-          <div className="grid grid-cols-2 gap-1.5">
-            <button
-              onClick={goWithErrorLogs}
-              className="flex items-center justify-center gap-1 py-1.5 rounded-md bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 text-rose-200 transition"
-            >
-              <Terminal className="w-3 h-3" />
-              <span>Error logs</span>
-            </button>
-            <button
-              onClick={goWithSlowTraces}
-              className="flex items-center justify-center gap-1 py-1.5 rounded-md bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-200 transition"
-            >
-              <Clock className="w-3 h-3" />
-              <span>Slow traces</span>
-            </button>
+          {hasErrors && errorRole === 'inherited' && causeName && (
+            <p className="text-[11px] leading-relaxed text-rose-200/90">
+              Its own calls are failing downstream in{' '}
+              <span className="font-semibold text-rose-200">{causeName}</span> — start there, not
+              with this service's logs.
+            </p>
+          )}
+          {hasErrors && errorRole === 'origin' && (
+            <p className="text-[11px] leading-relaxed text-rose-200/90">
+              This is where the failure starts: its own calls fail while its callers stay clean.
+            </p>
+          )}
+          <div className={`grid gap-1.5 ${hasErrors && isSlow ? 'grid-cols-3' : hasErrors ? 'grid-cols-2' : 'grid-cols-1'}`}>
+            {hasErrors && (
+              <>
+                <button
+                  onClick={goToFailingTraces}
+                  className="flex items-center justify-center gap-1 py-1.5 rounded-md bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 text-rose-200 transition"
+                  title="Open Tempo traces filtered to failing spans (server-side)"
+                >
+                  <GitBranch className="w-3 h-3" />
+                  <span>Failing traces</span>
+                </button>
+                {errorRole === 'inherited' && causeName && onFocusCause && (
+                  <button
+                    onClick={onFocusCause}
+                    className="flex items-center justify-center gap-1 py-1.5 rounded-md bg-slate-800/70 hover:bg-slate-700 border border-slate-700 text-slate-200 transition"
+                    title={`Inspect ${causeName}, the service where this cascade starts`}
+                  >
+                    <AlertTriangle className="w-3 h-3 text-rose-400" />
+                    <span>Cause: {causeName}</span>
+                  </button>
+                )}
+                <button
+                  onClick={goWithErrorLogs}
+                  className="flex items-center justify-center gap-1 py-1.5 rounded-md bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 text-rose-200 transition"
+                  title="Open Loki logs filtered to error lines"
+                >
+                  <Terminal className="w-3 h-3" />
+                  <span>Error logs</span>
+                </button>
+              </>
+            )}
+            {isSlow && (
+              <button
+                onClick={goWithSlowTraces}
+                className="flex items-center justify-center gap-1 py-1.5 rounded-md bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-200 transition"
+                title="Open Tempo traces filtered to slow requests (≥ 100 ms)"
+              >
+                <Clock className="w-3 h-3" />
+                <span>Slow traces</span>
+              </button>
+            )}
           </div>
         </div>
       )}
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        <div>
-          <div className="flex items-center justify-between mb-2">
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-              Live Endpoints ({endpoints.length})
-            </h4>
-            <span className="text-[10px] font-mono text-slate-400">{timeWindow}</span>
-          </div>
-
-          {loading ? (
-            <LoadingSpinner message="Loading endpoints…" size="sm" />
-          ) : error ? (
-            <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs">
-              {error}
+        {isExternal ? (
+          <div className="p-3.5 bg-slate-800/40 border border-slate-700/60 rounded-md text-xs font-mono space-y-2.5">
+            <div className="flex items-center gap-2 text-cyan-300 font-semibold">
+              <Globe className="w-4 h-4 text-cyan-400" />
+              <span>External Egress Traffic</span>
             </div>
-          ) : endpoints.length === 0 ? (
-            <p className="text-xs text-slate-400 italic py-2">
-              No HTTP/gRPC endpoints recorded in this window.
+            <p className="text-slate-300 text-[11px] leading-relaxed">
+              This node aggregates network traffic originating from workloads in this namespace that exit the Kubernetes cluster.
             </p>
-          ) : (
-            <div className="space-y-2">
-              {endpoints.map((ep, idx) => (
-                <div
-                  key={idx}
-                  className="p-2.5 rounded-md bg-slate-800/50 border border-slate-700/60 hover:border-slate-600 transition"
-                >
-                  <div className="flex items-center justify-between gap-1 mb-1.5">
-                    <span className="text-[11px] font-mono font-medium text-cyan-300 break-all">
-                      {ep.path}
-                    </span>
-                    {ep.method && (
-                      <span className="text-[9px] px-1 py-0.5 font-mono uppercase bg-slate-700 text-slate-300 rounded font-semibold shrink-0">
-                        {ep.method}
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-1 pt-1.5 border-t border-slate-700/40 text-[10px] font-mono">
-                    <div>
-                      <span className="text-slate-400 block">Rate</span>
-                      <span className="text-slate-200">
-                        {ep.rate > 0 ? `${ep.rate.toFixed(2)}/s` : <span className="text-slate-500">not measured</span>}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block">P95</span>
-                      <span className="text-slate-200">
-                        {ep.latencyP95 > 0 ? `${(ep.latencyP95 * 1000).toFixed(0)} ms` : <span className="text-slate-500">not measured</span>}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block">P99</span>
-                      <span className="text-slate-200">
-                        {ep.latencyP99 > 0 ? `${(ep.latencyP99 * 1000).toFixed(0)} ms` : <span className="text-slate-500">not measured</span>}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              ))}
+            <div className="p-2.5 rounded bg-slate-900/60 border border-slate-700/40 text-[10px] text-slate-400 space-y-1">
+              <span className="text-slate-300 font-semibold block">Common Egress Targets:</span>
+              <div>• Cloud Instance Metadata (<code className="text-cyan-300">169.254.169.254</code>)</div>
+              <div>• External payment gateways &amp; third-party APIs</div>
+              <div>• External DNS, monitoring, and telemetry ingestion</div>
             </div>
-          )}
-        </div>
+            <div className="text-[10px] text-slate-400 italic">
+              Grouped and observed via eBPF socket flows (<code className="text-slate-300">rename_unresolved_hosts_outgoing</code>).
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Live Endpoints ({endpoints.length})
+              </h4>
+              <span className="text-[10px] font-mono text-slate-400">{timeWindow}</span>
+            </div>
+
+            {loading ? (
+              <LoadingSpinner message="Loading endpoints…" size="sm" />
+            ) : error ? (
+              <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-300 text-xs">
+                {error}
+              </div>
+            ) : endpoints.length === 0 ? (
+              <p className="text-xs text-slate-400 italic py-2">
+                No HTTP/gRPC endpoints recorded in this window.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {endpoints.map((ep, idx) => (
+                  <div
+                    key={idx}
+                    className="p-2.5 rounded-md bg-slate-800/50 border border-slate-700/60 hover:border-slate-600 transition"
+                  >
+                    <div className="flex items-center justify-between gap-1 mb-1.5">
+                      <span className="text-[11px] font-mono font-medium text-cyan-300 break-all">
+                        {ep.path}
+                      </span>
+                      {ep.method && (
+                        <span className="text-[9px] px-1 py-0.5 font-mono uppercase bg-slate-700 text-slate-300 rounded font-semibold shrink-0">
+                          {ep.method}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-1 pt-1.5 border-t border-slate-700/40 text-[10px] font-mono">
+                      <div>
+                        <span className="text-slate-400 block">Rate</span>
+                        <span className="text-slate-200">
+                          {ep.rate > 0 ? `${ep.rate.toFixed(2)}/s` : <span className="text-slate-400">not measured</span>}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block">P95</span>
+                        <span className="text-slate-200">
+                          {ep.latencyP95 > 0 ? `${(ep.latencyP95 * 1000).toFixed(0)} ms` : <span className="text-slate-400">not measured</span>}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block">P99</span>
+                        <span className="text-slate-200">
+                          {ep.latencyP99 > 0 ? `${(ep.latencyP99 * 1000).toFixed(0)} ms` : <span className="text-slate-400">not measured</span>}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

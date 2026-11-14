@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -142,7 +143,7 @@ func FetchParallel(queries ...func() (json.RawMessage, error)) []json.RawMessage
 // OBI 0.15 stopped exporting service.name as a metric-level label on the RED
 // families (it moved to resource attributes only — pkg/export/attributes/
 // attr_defs.go pins ServiceName: false in the app attribute group), while
-// Beyla 3.x always carried service_name and the k8s metadata decorator always
+// Pre-1.0 releases always carried service_name and the k8s metadata decorator always
 // provides k8s_owner_name. Every query therefore groups by BOTH labels and
 // readers resolve identity through this chain:
 // service_name -> k8s_owner_name -> k8s_deployment_name.
@@ -155,101 +156,101 @@ func MetricServiceName(metric map[string]string) string {
 	return ""
 }
 
-func (c *Client) GetServiceRates(namespace, window string) (json.RawMessage, error) {
+func (c *Client) GetServiceRates(ctx context.Context, namespace, window string) (json.RawMessage, error) {
 	// OBI emits a separate server-side metric family per protocol: HTTP
 	// requests, gRPC calls, DB/Redis operations (RESP, SQL, Mongo), messaging.
 	// Sum them all so a service shows traffic whichever protocol it speaks.
 	// Datastore rates are credible (client- and server-side counts agree);
 	// only the db_server DURATION histogram is broken on persistent
 	// connections — latency never comes from this query.
-	query := fmt.Sprintf(`sum(rate({__name__=~"http_server_request_duration_seconds_count|rpc_server_call_duration_seconds_count|db_server_operation_duration_seconds_count",k8s_namespace_name=%q}[%s])) by (service_name, k8s_owner_name)`, namespace, window)
-	return c.Query(context.Background(), query)
+	query := fmt.Sprintf(`sum(rate({__name__=~"http_server_request_duration_seconds_count|rpc_server_call_duration_seconds_count|db_server_operation_duration_seconds_count",k8s_namespace_name=%q}[%s])) by (k8s_owner_name) or sum(rate({__name__=~"http_server_request_duration_seconds_count|rpc_server_call_duration_seconds_count|db_server_operation_duration_seconds_count",k8s_namespace_name=%q}[%s])) by (service_name)`, namespace, window, namespace, window)
+	return c.Query(ctx, query)
 }
 
-func (c *Client) GetServiceLatency(namespace, window, quantile string) (json.RawMessage, error) {
-	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(http_server_request_duration_seconds_bucket{k8s_namespace_name=%q}[%s])) by (le, service_name, k8s_owner_name))`, quantile, namespace, window)
-	return c.Query(context.Background(), query)
+func (c *Client) GetServiceLatency(ctx context.Context, namespace, window, quantile string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(http_server_request_duration_seconds_bucket{k8s_namespace_name=%q}[%s])) by (le, k8s_owner_name)) or histogram_quantile(%s, sum(rate(http_server_request_duration_seconds_bucket{k8s_namespace_name=%q}[%s])) by (le, service_name))`, quantile, namespace, window, quantile, namespace, window)
+	return c.Query(ctx, query)
 }
 
-func (c *Client) GetEndpointMetrics(namespace, service, window string) (json.RawMessage, error) {
+func (c *Client) GetEndpointMetrics(ctx context.Context, namespace, service, window string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name=%q,k8s_owner_name=%q}[%s])) by (http_route, http_request_method) or sum(rate(http_client_request_duration_seconds_count{k8s_namespace_name=%q,server_address=~%q}[%s])) by (http_route, http_request_method)`, namespace, service, window, namespace, serverAddressPattern(service), window)
-	return c.Query(context.Background(), query)
+	return c.Query(ctx, query)
 }
 
 // GetEndpointErrors returns the 5xx fraction of requests per endpoint
 // (0 = all healthy, 1 = every request failing).
-func (c *Client) GetEndpointErrors(namespace, service, window string) (json.RawMessage, error) {
+func (c *Client) GetEndpointErrors(ctx context.Context, namespace, service, window string) (json.RawMessage, error) {
 	total := fmt.Sprintf(`(sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name=%q,k8s_owner_name=%q}[%s])) by (http_route, http_request_method) or sum(rate(http_client_request_duration_seconds_count{k8s_namespace_name=%q,server_address=~%q}[%s])) by (http_route, http_request_method))`, namespace, service, window, namespace, serverAddressPattern(service), window)
 	errors := fmt.Sprintf(`(sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name=%q,k8s_owner_name=%q,http_response_status_code=~"5.."}[%s])) by (http_route, http_request_method) or sum(rate(http_client_request_duration_seconds_count{k8s_namespace_name=%q,server_address=~%q,http_response_status_code=~"5.."}[%s])) by (http_route, http_request_method))`, namespace, service, window, namespace, serverAddressPattern(service), window)
-	return c.Query(context.Background(), fmt.Sprintf(`(%s) / (%s)`, errors, total))
+	return c.Query(ctx, fmt.Sprintf(`(%s) / (%s)`, errors, total))
 }
 
 // GetServiceErrors returns the 5xx fraction of requests per service.
-func (c *Client) GetServiceErrors(namespace, window string) (json.RawMessage, error) {
-	total := fmt.Sprintf(`sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name=%q}[%s])) by (service_name, k8s_owner_name)`, namespace, window)
-	errors := fmt.Sprintf(`sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name=%q,http_response_status_code=~"5.."}[%s])) by (service_name, k8s_owner_name)`, namespace, window)
-	return c.Query(context.Background(), fmt.Sprintf(`(%s) / (%s)`, errors, total))
+func (c *Client) GetServiceErrors(ctx context.Context, namespace, window string) (json.RawMessage, error) {
+	total := fmt.Sprintf(`sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name=%q}[%s])) by (k8s_owner_name) or sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name=%q}[%s])) by (service_name)`, namespace, window, namespace, window)
+	errors := fmt.Sprintf(`sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name=%q,http_response_status_code=~"5.."}[%s])) by (k8s_owner_name) or sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name=%q,http_response_status_code=~"5.."}[%s])) by (service_name)`, namespace, window, namespace, window)
+	return c.Query(ctx, fmt.Sprintf(`(%s) / (%s)`, errors, total))
 }
 
 // GetServiceRPCErrors returns the fraction of gRPC calls whose status is not
 // "OK" (OBI reports the canonical gRPC status name, not the numeric code).
-func (c *Client) GetServiceRPCErrors(namespace, window string) (json.RawMessage, error) {
-	total := fmt.Sprintf(`sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name=%q}[%s])) by (service_name, k8s_owner_name)`, namespace, window)
-	errors := fmt.Sprintf(`sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name=%q,rpc_response_status_code!="OK"}[%s])) by (service_name, k8s_owner_name)`, namespace, window)
-	return c.Query(context.Background(), fmt.Sprintf(`(%s) / (%s)`, errors, total))
+func (c *Client) GetServiceRPCErrors(ctx context.Context, namespace, window string) (json.RawMessage, error) {
+	total := fmt.Sprintf(`sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name=%q}[%s])) by (k8s_owner_name) or sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name=%q}[%s])) by (service_name)`, namespace, window, namespace, window)
+	errors := fmt.Sprintf(`sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name=%q,rpc_response_status_code!="OK"}[%s])) by (k8s_owner_name) or sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name=%q,rpc_response_status_code!="OK"}[%s])) by (service_name)`, namespace, window, namespace, window)
+	return c.Query(ctx, fmt.Sprintf(`(%s) / (%s)`, errors, total))
 }
 
 // GetServiceRPCLatency returns a gRPC latency quantile per service.
-func (c *Client) GetServiceRPCLatency(namespace, window, quantile string) (json.RawMessage, error) {
-	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(rpc_server_call_duration_seconds_bucket{k8s_namespace_name=%q}[%s])) by (le, service_name, k8s_owner_name))`, quantile, namespace, window)
-	return c.Query(context.Background(), query)
+func (c *Client) GetServiceRPCLatency(ctx context.Context, namespace, window, quantile string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(rpc_server_call_duration_seconds_bucket{k8s_namespace_name=%q}[%s])) by (le, k8s_owner_name)) or histogram_quantile(%s, sum(rate(rpc_server_call_duration_seconds_bucket{k8s_namespace_name=%q}[%s])) by (le, service_name))`, quantile, namespace, window, quantile, namespace, window)
+	return c.Query(ctx, query)
 }
 
 // GetEndpointRPCMetrics returns the gRPC call rate per method (from server metrics or client calls targeting this service).
-func (c *Client) GetEndpointRPCMetrics(namespace, service, window string) (json.RawMessage, error) {
+func (c *Client) GetEndpointRPCMetrics(ctx context.Context, namespace, service, window string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name=%q,k8s_owner_name=%q}[%s])) by (rpc_method) or sum(rate(rpc_client_call_duration_seconds_count{k8s_namespace_name=%q,server_address=~%q}[%s])) by (rpc_method)`, namespace, service, window, namespace, serverAddressPattern(service), window)
-	return c.Query(context.Background(), query)
+	return c.Query(ctx, query)
 }
 
 // GetEndpointRPCErrors returns the fraction of gRPC calls per method whose
 // status is not "OK".
-func (c *Client) GetEndpointRPCErrors(namespace, service, window string) (json.RawMessage, error) {
+func (c *Client) GetEndpointRPCErrors(ctx context.Context, namespace, service, window string) (json.RawMessage, error) {
 	total := fmt.Sprintf(`(sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name=%q,k8s_owner_name=%q}[%s])) by (rpc_method) or sum(rate(rpc_client_call_duration_seconds_count{k8s_namespace_name=%q,server_address=~%q}[%s])) by (rpc_method))`, namespace, service, window, namespace, serverAddressPattern(service), window)
 	errors := fmt.Sprintf(`(sum(rate(rpc_server_call_duration_seconds_count{k8s_namespace_name=%q,k8s_owner_name=%q,rpc_response_status_code!="OK"}[%s])) by (rpc_method) or sum(rate(rpc_client_call_duration_seconds_count{k8s_namespace_name=%q,server_address=~%q,rpc_response_status_code!="OK"}[%s])) by (rpc_method))`, namespace, service, window, namespace, serverAddressPattern(service), window)
-	return c.Query(context.Background(), fmt.Sprintf(`(%s) / (%s)`, errors, total))
+	return c.Query(ctx, fmt.Sprintf(`(%s) / (%s)`, errors, total))
 }
 
 // GetEndpointRPCLatency returns a gRPC latency quantile per method.
-func (c *Client) GetEndpointRPCLatency(namespace, service, window, quantile string) (json.RawMessage, error) {
+func (c *Client) GetEndpointRPCLatency(ctx context.Context, namespace, service, window, quantile string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(rpc_server_call_duration_seconds_bucket{k8s_namespace_name=%q,k8s_owner_name=%q}[%s])) by (le, rpc_method)) or histogram_quantile(%s, sum(rate(rpc_client_call_duration_seconds_bucket{k8s_namespace_name=%q,server_address=~%q}[%s])) by (le, rpc_method))`, quantile, namespace, service, window, quantile, namespace, serverAddressPattern(service), window)
-	return c.Query(context.Background(), query)
+	return c.Query(ctx, query)
 }
 
 // GetEndpointLatency returns a latency quantile (p50/p95/p99) per endpoint.
-func (c *Client) GetEndpointLatency(namespace, service, window, quantile string) (json.RawMessage, error) {
+func (c *Client) GetEndpointLatency(ctx context.Context, namespace, service, window, quantile string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(http_server_request_duration_seconds_bucket{k8s_namespace_name=%q,k8s_owner_name=%q}[%s])) by (le, http_route, http_request_method)) or histogram_quantile(%s, sum(rate(http_client_request_duration_seconds_bucket{k8s_namespace_name=%q,server_address=~%q}[%s])) by (le, http_route, http_request_method))`, quantile, namespace, service, window, quantile, namespace, serverAddressPattern(service), window)
-	return c.Query(context.Background(), query)
+	return c.Query(ctx, query)
 }
 
-func (c *Client) GetServerMetrics(namespace, window string) (json.RawMessage, error) {
+func (c *Client) GetServerMetrics(ctx context.Context, namespace, window string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`sum(rate(http_server_request_duration_seconds_count{k8s_namespace_name=%q}[%s])) by (service_name, k8s_owner_name, http_route)`, namespace, window)
-	return c.Query(context.Background(), query)
+	return c.Query(ctx, query)
 }
 
-func (c *Client) GetClientMetrics(namespace, window string) (json.RawMessage, error) {
+func (c *Client) GetClientMetrics(ctx context.Context, namespace, window string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`sum(rate(http_client_request_duration_seconds_count{k8s_namespace_name=%q}[%s])) by (service_name, k8s_owner_name, http_route, server_address, server_service_namespace, server_k8s_namespace_name)`, namespace, window)
-	return c.Query(context.Background(), query)
+	return c.Query(ctx, query)
 }
 
-func (c *Client) GetRPCClientMetrics(namespace, window string) (json.RawMessage, error) {
+func (c *Client) GetRPCClientMetrics(ctx context.Context, namespace, window string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`sum(rate(rpc_client_call_duration_seconds_count{k8s_namespace_name=%q}[%s])) by (service_name, k8s_owner_name, server_address, server_service_namespace, server_k8s_namespace_name)`, namespace, window)
-	return c.Query(context.Background(), query)
+	return c.Query(ctx, query)
 }
 
 // GetClientLatencyByEdge returns p95 latency for each client->server interaction edge
-func (c *Client) GetClientLatencyByEdge(namespace, window, quantile string) (json.RawMessage, error) {
+func (c *Client) GetClientLatencyByEdge(ctx context.Context, namespace, window, quantile string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(rpc_client_call_duration_seconds_bucket{k8s_namespace_name=%q}[%s])) by (le, service_name, k8s_owner_name, server_address, server_service_namespace, server_k8s_namespace_name))`, quantile, namespace, window)
-	return c.Query(context.Background(), query)
+	return c.Query(ctx, query)
 }
 
 // GetClientLatencyByServer returns a latency quantile for each target server
@@ -259,9 +260,9 @@ func (c *Client) GetClientLatencyByEdge(namespace, window, quantile string) (jso
 // datastores: their server-side histogram mis-pairs operations on persistent
 // connections (see GetDBServerLatency). The source must be surfaced as
 // SourceClientObserved, not SourceMetrics.
-func (c *Client) GetClientLatencyByServer(namespace, window, quantile string) (json.RawMessage, error) {
+func (c *Client) GetClientLatencyByServer(ctx context.Context, namespace, window, quantile string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate({__name__=~"rpc_client_call_duration_seconds_bucket|db_client_operation_duration_seconds_bucket|messaging_client_operation_duration_seconds_bucket",k8s_namespace_name=%q}[%s])) by (le, server_address, server_service_namespace, server_k8s_namespace_name))`, quantile, namespace, window)
-	return c.Query(context.Background(), query)
+	return c.Query(ctx, query)
 }
 
 // GetClientErrorsByServer returns the fraction of failed operations per target
@@ -269,7 +270,7 @@ func (c *Client) GetClientLatencyByServer(namespace, window, quantile string) (j
 // different label (gRPC: rpc_response_status_code != "OK"; DB and messaging:
 // error_type), and a single AND-combined selector would exclude the other
 // families' series, so the terms are queried separately and merged here.
-func (c *Client) GetClientErrorsByServer(namespace, window string) (json.RawMessage, error) {
+func (c *Client) GetClientErrorsByServer(ctx context.Context, namespace, window string) (json.RawMessage, error) {
 	by := ` by (server_address, server_service_namespace, server_k8s_namespace_name)`
 	families := []struct{ metric, errFilter string }{
 		{"rpc_client_call_duration_seconds_count", `rpc_response_status_code!="OK"`},
@@ -278,32 +279,24 @@ func (c *Client) GetClientErrorsByServer(namespace, window string) (json.RawMess
 	}
 	totalQ := fmt.Sprintf(`sum(rate({__name__=~"rpc_client_call_duration_seconds_count|db_client_operation_duration_seconds_count|messaging_client_operation_duration_seconds_count",k8s_namespace_name=%q}[%s]))%s`, namespace, window, by)
 
-	totals, err := c.Query(context.Background(), totalQ)
+	totals, err := c.Query(ctx, totalQ)
 	if err != nil {
 		return nil, err
 	}
-	var totalRes queryResult
-	if err := json.Unmarshal(totals, &totalRes); err != nil {
-		return nil, err
-	}
 	var totalEntries []promInstantVector
-	if err := json.Unmarshal(totalRes.Data.Result, &totalEntries); err != nil {
+	if err := json.Unmarshal(totals, &totalEntries); err != nil {
 		return nil, err
 	}
 
 	errSums := make(map[string]float64, len(totalEntries))
 	for _, fam := range families {
 		errQ := fmt.Sprintf(`sum(rate(%s{k8s_namespace_name=%q,%s}[%s]))%s`, fam.metric, namespace, fam.errFilter, window, by)
-		raw, err := c.Query(context.Background(), errQ)
+		raw, err := c.Query(ctx, errQ)
 		if err != nil {
 			return nil, err
 		}
-		var res queryResult
-		if err := json.Unmarshal(raw, &res); err != nil {
-			return nil, err
-		}
 		var entries []promInstantVector
-		if err := json.Unmarshal(res.Data.Result, &entries); err != nil {
+		if err := json.Unmarshal(raw, &entries); err != nil {
 			return nil, err
 		}
 		for _, e := range entries {
@@ -325,14 +318,7 @@ func (c *Client) GetClientErrorsByServer(namespace, window string) (json.RawMess
 			"value":  []any{time.Now().Unix(), strconv.FormatFloat(ratio, 'f', -1, 64)},
 		})
 	}
-	result, err := json.Marshal(map[string]any{
-		"status": "success",
-		"data":   map[string]any{"resultType": "vector", "result": out},
-	})
-	if err != nil {
-		return nil, err
-	}
-	return result, nil
+	return json.Marshal(out)
 }
 
 // promInstantVector is one series of a Prometheus instant-vector response,
@@ -361,33 +347,33 @@ func (v *promInstantVector) UnmarshalJSON(b []byte) error {
 }
 
 // GetClientErrorsByEdge returns the error rate for each client->server interaction edge
-func (c *Client) GetClientErrorsByEdge(namespace, window string) (json.RawMessage, error) {
+func (c *Client) GetClientErrorsByEdge(ctx context.Context, namespace, window string) (json.RawMessage, error) {
 	total := fmt.Sprintf(`sum(rate(rpc_client_call_duration_seconds_count{k8s_namespace_name=%q}[%s])) by (service_name, k8s_owner_name, server_address, server_service_namespace, server_k8s_namespace_name)`, namespace, window)
 	errors := fmt.Sprintf(`sum(rate(rpc_client_call_duration_seconds_count{k8s_namespace_name=%q,rpc_response_status_code!="OK"}[%s])) by (service_name, k8s_owner_name, server_address, server_service_namespace, server_k8s_namespace_name)`, namespace, window)
-	return c.Query(context.Background(), fmt.Sprintf(`(%s) / (%s)`, errors, total))
+	return c.Query(ctx, fmt.Sprintf(`(%s) / (%s)`, errors, total))
 }
 
 // GetNetworkFlows returns eBPF network flow rates targeting the namespace (bytes/sec)
-func (c *Client) GetNetworkFlows(namespace, window string) (json.RawMessage, error) {
+func (c *Client) GetNetworkFlows(ctx context.Context, namespace, window string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`sum(rate(obi_network_flow_bytes_total{k8s_dst_namespace=%q}[%s])) by (k8s_src_owner_name, k8s_dst_owner_name, k8s_src_namespace, k8s_dst_namespace, direction)`, namespace, window)
-	return c.Query(context.Background(), query)
+	return c.Query(ctx, query)
 }
 
 // GetOutboundNetworkFlows returns eBPF network flow rates originating in the namespace
-func (c *Client) GetOutboundNetworkFlows(namespace, window string) (json.RawMessage, error) {
+func (c *Client) GetOutboundNetworkFlows(ctx context.Context, namespace, window string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`sum(rate(obi_network_flow_bytes_total{k8s_src_namespace=%q}[%s])) by (k8s_src_owner_name, k8s_dst_owner_name, k8s_src_namespace, k8s_dst_namespace, direction)`, namespace, window)
-	return c.Query(context.Background(), query)
+	return c.Query(ctx, query)
 }
 
 // GetServiceThroughput returns incoming byte throughput per destination service in the namespace
-func (c *Client) GetServiceThroughput(namespace, window string) (json.RawMessage, error) {
+func (c *Client) GetServiceThroughput(ctx context.Context, namespace, window string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`sum(rate(obi_network_flow_bytes_total{k8s_dst_namespace=%q}[%s])) by (k8s_dst_owner_name)`, namespace, window)
-	return c.Query(context.Background(), query)
+	return c.Query(ctx, query)
 }
 
 // --- Database / cache traffic -------------------------------------------------
 //
-// Beyla parses DB wire protocols (Redis RESP, SQL, MongoDB, ...) and emits
+// OBI parses DB wire protocols (Redis RESP, SQL, MongoDB, ...) and emits
 // db_client_operation_duration_seconds on the CALLER and
 // db_server_operation_duration_seconds on the database process itself. These
 // families are the only source of latency for a datastore: it speaks RESP/TCP,
@@ -395,55 +381,40 @@ func (c *Client) GetServiceThroughput(namespace, window string) (json.RawMessage
 // cache like redis-cart reports a borrowed request rate and NO latency at all.
 
 // GetDBClientRates returns the measured call rate per (caller, database) pair.
-func (c *Client) GetDBClientRates(namespace, window string) (json.RawMessage, error) {
+func (c *Client) GetDBClientRates(ctx context.Context, namespace, window string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`sum(rate(db_client_operation_duration_seconds_count{k8s_namespace_name=%q}[%s])) by (service_name, k8s_owner_name, server_address, server_service_namespace, server_k8s_namespace_name)`, namespace, window)
-	return c.Query(context.Background(), query)
+	return c.Query(ctx, query)
 }
 
 // GetDBClientLatency returns the caller-observed latency quantile per
 // (caller, database) pair.
-func (c *Client) GetDBClientLatency(namespace, window, quantile string) (json.RawMessage, error) {
+func (c *Client) GetDBClientLatency(ctx context.Context, namespace, window, quantile string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(db_client_operation_duration_seconds_bucket{k8s_namespace_name=%q}[%s])) by (le, service_name, k8s_owner_name, server_address, server_service_namespace, server_k8s_namespace_name))`, quantile, namespace, window)
-	return c.Query(context.Background(), query)
+	return c.Query(ctx, query)
 }
 
 // GetEndpointDBMetrics returns the datastore operation rate per command
 // (db_operation_name: GET, SET, CLIENT, ...), observed on the callers that
 // target this datastore.
-func (c *Client) GetEndpointDBMetrics(namespace, service, window string) (json.RawMessage, error) {
+func (c *Client) GetEndpointDBMetrics(ctx context.Context, namespace, service, window string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`sum(rate(db_client_operation_duration_seconds_count{k8s_namespace_name=%q,server_address=~%q}[%s])) by (db_operation_name)`, namespace, serverAddressPattern(service), window)
-	return c.Query(context.Background(), query)
+	return c.Query(ctx, query)
 }
 
 // GetEndpointDBErrors returns the fraction of failed operations per command as
 // seen by the callers. OBI marks failures with error_type / db_response_status
 // ("ERR"); healthy series carry no such label.
-func (c *Client) GetEndpointDBErrors(namespace, service, window string) (json.RawMessage, error) {
+func (c *Client) GetEndpointDBErrors(ctx context.Context, namespace, service, window string) (json.RawMessage, error) {
 	total := fmt.Sprintf(`sum(rate(db_client_operation_duration_seconds_count{k8s_namespace_name=%q,server_address=~%q}[%s])) by (db_operation_name)`, namespace, serverAddressPattern(service), window)
 	errors := fmt.Sprintf(`sum(rate(db_client_operation_duration_seconds_count{k8s_namespace_name=%q,server_address=~%q,error_type!=""}[%s])) by (db_operation_name)`, namespace, serverAddressPattern(service), window)
-	return c.Query(context.Background(), fmt.Sprintf(`(%s) / (%s)`, errors, total))
+	return c.Query(ctx, fmt.Sprintf(`(%s) / (%s)`, errors, total))
 }
 
 // GetEndpointDBLatency returns a caller-observed latency quantile per
 // datastore command.
-func (c *Client) GetEndpointDBLatency(namespace, service, window, quantile string) (json.RawMessage, error) {
+func (c *Client) GetEndpointDBLatency(ctx context.Context, namespace, service, window, quantile string) (json.RawMessage, error) {
 	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(db_client_operation_duration_seconds_bucket{k8s_namespace_name=%q,server_address=~%q}[%s])) by (le, db_operation_name))`, quantile, namespace, serverAddressPattern(service), window)
-	return c.Query(context.Background(), query)
-}
-
-// GetDBServerLatency returns the database-observed latency quantile per
-// database service.
-//
-// NOT WIRED UP, ON PURPOSE. On this stack the value is wrong: for redis-cart it
-// reports a 320 ms mean / 1717 ms p95 for the same calls the client measures at
-// 0.16 ms / 4.75 ms, and sum(rate(_sum)) sits at ~1.0 seconds per second, which
-// means the timer is running continuously and effectively measuring the gap to
-// the next request (1/request-rate = 0.324 s matches the reported 0.320 s).
-// Keep it here as the documented query, but do not feed it to the topology
-// until the pairing behaviour is confirmed fixed upstream.
-func (c *Client) GetDBServerLatency(namespace, window, quantile string) (json.RawMessage, error) {
-	query := fmt.Sprintf(`histogram_quantile(%s, sum(rate(db_server_operation_duration_seconds_bucket{k8s_namespace_name=%q}[%s])) by (le, service_name))`, quantile, namespace, window)
-	return c.Query(context.Background(), query)
+	return c.Query(ctx, query)
 }
 
 // GetServiceLanguages returns service_name -> runtime language from the
@@ -454,13 +425,99 @@ func (c *Client) GetDBServerLatency(namespace, window, quantile string) (json.Ra
 // declares for itself), never its own Go exporter runtime. Because the series
 // exists for every discovered process, this does not depend on somebody having
 // opened the Traces view, unlike the trace-resource fallback.
-func (c *Client) GetServiceLanguages(namespace string) (map[string]string, error) {
+func (c *Client) GetServiceLanguages(ctx context.Context, namespace string) (map[string]string, error) {
 	query := fmt.Sprintf(`target_info{k8s_namespace_name=%q,telemetry_sdk_language!=""}`, namespace)
-	raw, err := c.Query(context.Background(), query)
+	raw, err := c.Query(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 	return ParseServiceLanguages(raw), nil
+}
+
+// --- Pod & Cluster Resource Metrics (cAdvisor / KSM / Node Exporter) ---------
+
+// GetPodCPUUsage returns current CPU usage rate in cores per pod.
+func (c *Client) GetPodCPUUsage(ctx context.Context, namespace string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`sum by (pod, k8s_pod_name) (rate(container_cpu_usage_seconds_total{namespace=~%q,container!="",container!="POD"}[2m]))`, namespace)
+	return c.Query(ctx, query)
+}
+
+// GetPodMemoryUsage returns current memory working set in bytes per pod.
+func (c *Client) GetPodMemoryUsage(ctx context.Context, namespace string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`sum by (pod, k8s_pod_name) (container_memory_working_set_bytes{namespace=~%q,container!="",container!="POD"})`, namespace)
+	return c.Query(ctx, query)
+}
+
+// GetPodCPULimits returns configured CPU limits in cores per pod.
+func (c *Client) GetPodCPULimits(ctx context.Context, namespace string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`sum by (pod, k8s_pod_name) (kube_pod_container_resource_limits{namespace=~%q,resource="cpu"})`, namespace)
+	return c.Query(ctx, query)
+}
+
+// GetPodMemoryLimits returns configured memory limits in bytes per pod.
+func (c *Client) GetPodMemoryLimits(ctx context.Context, namespace string) (json.RawMessage, error) {
+	query := fmt.Sprintf(`sum by (pod, k8s_pod_name) (kube_pod_container_resource_limits{namespace=~%q,resource="memory"})`, namespace)
+	return c.Query(ctx, query)
+}
+
+// GetClusterCPUUsage returns cluster-wide non-idle CPU core usage.
+func (c *Client) GetClusterCPUUsage(ctx context.Context) (float64, error) {
+	raw, err := c.Query(ctx, `sum(rate(node_cpu_seconds_total{mode!="idle"}[2m]))`)
+	if err != nil {
+		return 0, err
+	}
+	entries := ParseMetricEntries(raw)
+	if len(entries) > 0 {
+		return entries[0].FloatValue(), nil
+	}
+	return 0, nil
+}
+
+// GetClusterCPUTotal returns cluster-wide total logical CPU cores.
+func (c *Client) GetClusterCPUTotal(ctx context.Context) (float64, error) {
+	raw, err := c.Query(ctx, `count(count by (cpu) (node_cpu_seconds_total))`)
+	if err != nil {
+		return 0, err
+	}
+	entries := ParseMetricEntries(raw)
+	if len(entries) > 0 {
+		return entries[0].FloatValue(), nil
+	}
+	return 0, nil
+}
+
+// GetClusterMemoryUsage returns cluster-wide used memory in bytes.
+func (c *Client) GetClusterMemoryUsage(ctx context.Context) (float64, error) {
+	raw, err := c.Query(ctx, `sum(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes)`)
+	if err != nil {
+		return 0, err
+	}
+	entries := ParseMetricEntries(raw)
+	if len(entries) > 0 {
+		return entries[0].FloatValue(), nil
+	}
+	return 0, nil
+}
+
+// GetClusterMemoryTotal returns cluster-wide total memory in bytes.
+func (c *Client) GetClusterMemoryTotal(ctx context.Context) (float64, error) {
+	raw, err := c.Query(ctx, `sum(node_memory_MemTotal_bytes)`)
+	if err != nil {
+		return 0, err
+	}
+	entries := ParseMetricEntries(raw)
+	if len(entries) > 0 {
+		return entries[0].FloatValue(), nil
+	}
+	return 0, nil
+}
+
+// ExtractPodName extracts the pod name from standard cAdvisor or OBI label sets.
+func ExtractPodName(m map[string]string) string {
+	if pod := m["pod"]; pod != "" {
+		return pod
+	}
+	return m["k8s_pod_name"]
 }
 
 // ParseServiceLanguages maps a target_info instant vector to service language
@@ -491,6 +548,15 @@ func ParseVector(raw json.RawMessage) ([]VectorResult, error) {
 	return results, nil
 }
 
+// ParseMetricEntries unmarshals a vector response, returning an empty slice on error.
+func ParseMetricEntries(raw json.RawMessage) []VectorResult {
+	var results []VectorResult
+	if err := json.Unmarshal(raw, &results); err != nil {
+		return nil
+	}
+	return results
+}
+
 type VectorResult struct {
 	Metric map[string]string `json:"metric"`
 	Value  []interface{}     `json:"value"`
@@ -500,12 +566,19 @@ func (v VectorResult) FloatValue() float64 {
 	if len(v.Value) >= 2 {
 		switch val := v.Value[1].(type) {
 		case float64:
-			return val
+			return FiniteMetricValue(val)
 		case string:
-			var f float64
-			fmt.Sscanf(val, "%f", &f)
-			return f
+			if f, err := strconv.ParseFloat(val, 64); err == nil {
+				return FiniteMetricValue(f)
+			}
 		}
 	}
 	return 0
+}
+
+func FiniteMetricValue(value float64) float64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0
+	}
+	return value
 }

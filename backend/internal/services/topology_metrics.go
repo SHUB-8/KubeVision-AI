@@ -1,12 +1,11 @@
 package services
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/kubevision/backend/internal/clients/prometheus"
 	"github.com/kubevision/backend/models"
-	"math"
-	"strconv"
 )
 
 type edgeAccumulator struct {
@@ -23,39 +22,18 @@ type edgeAccumulator struct {
 	latencySource   string
 }
 
-type rawMetricEntry struct {
-	Metric map[string]string `json:"metric"`
-	Value  []interface{}     `json:"value"`
-}
+type rawMetricEntry = prometheus.VectorResult
 
 func parseMetricEntries(raw json.RawMessage) []rawMetricEntry {
-	var results []rawMetricEntry
-	if err := json.Unmarshal(raw, &results); err != nil {
-		return nil
-	}
-	return results
+	return prometheus.ParseMetricEntries(raw)
 }
 
 func parseRateValue(val []interface{}) float64 {
-	if len(val) >= 2 {
-		switch v := val[1].(type) {
-		case float64:
-			return finiteMetricValue(v)
-		case string:
-			f, err := strconv.ParseFloat(v, 64)
-			if err == nil {
-				return finiteMetricValue(f)
-			}
-		}
-	}
-	return 0
+	return (prometheus.VectorResult{Value: val}).FloatValue()
 }
 
 func finiteMetricValue(value float64) float64 {
-	if math.IsNaN(value) || math.IsInf(value, 0) {
-		return 0
-	}
-	return value
+	return prometheus.FiniteMetricValue(value)
 }
 
 // sourceRank orders provenance by strength of evidence. A larger rank is weaker.
@@ -88,11 +66,12 @@ func weakerSource(a, b string) string {
 }
 
 func (s *TopologyService) buildEdges(
+	ctx context.Context,
 	namespace, window string,
 	ipToService map[string]string,
 	svcProtocols map[string]string,
 	nodeMap map[string]models.Node,
-) ([]models.Edge, error) {
+) ([]models.Edge, map[string]float64, error) {
 	edgeMap := make(map[string]*edgeAccumulator)
 
 	nodeKey := func(name, endpointNamespace string) string {
@@ -129,23 +108,26 @@ func (s *TopologyService) buildEdges(
 	// All Prometheus queries run CONCURRENTLY (independent) — sequential they
 	// summed to seconds per /topology request.
 	results := prometheus.FetchParallel(
-		func() (json.RawMessage, error) { return s.promClient.GetClientMetrics(namespace, window) },
-		func() (json.RawMessage, error) { return s.promClient.GetRPCClientMetrics(namespace, window) },
-		func() (json.RawMessage, error) { return s.promClient.GetNetworkFlows(namespace, window) },
-		func() (json.RawMessage, error) { return s.promClient.GetOutboundNetworkFlows(namespace, window) },
-		func() (json.RawMessage, error) { return s.promClient.GetDBClientRates(namespace, window) },
-		func() (json.RawMessage, error) { return s.promClient.GetDBClientLatency(namespace, window, "0.95") },
-		func() (json.RawMessage, error) { return s.promClient.GetClientLatencyByEdge(namespace, window, "0.95") },
-		func() (json.RawMessage, error) { return s.promClient.GetClientErrorsByEdge(namespace, window) },
-		func() (json.RawMessage, error) { return s.promClient.GetServiceLatency(namespace, window, "0.95") },
+		func() (json.RawMessage, error) { return s.promClient.GetClientMetrics(ctx, namespace, window) },
+		func() (json.RawMessage, error) { return s.promClient.GetRPCClientMetrics(ctx, namespace, window) },
+		func() (json.RawMessage, error) { return s.promClient.GetNetworkFlows(ctx, namespace, window) },
+		func() (json.RawMessage, error) { return s.promClient.GetOutboundNetworkFlows(ctx, namespace, window) },
+		func() (json.RawMessage, error) { return s.promClient.GetDBClientRates(ctx, namespace, window) },
+		func() (json.RawMessage, error) { return s.promClient.GetDBClientLatency(ctx, namespace, window, "0.95") },
+		func() (json.RawMessage, error) { return s.promClient.GetClientLatencyByEdge(ctx, namespace, window, "0.95") },
+		func() (json.RawMessage, error) { return s.promClient.GetClientErrorsByEdge(ctx, namespace, window) },
+		func() (json.RawMessage, error) { return s.promClient.GetServiceLatency(ctx, namespace, window, "0.95") },
 		func() (json.RawMessage, error) {
-			return s.promClient.GetClientLatencyByServer(namespace, window, "0.95")
+			return s.promClient.GetClientLatencyByServer(ctx, namespace, window, "0.95")
 		},
-		func() (json.RawMessage, error) { return s.promClient.GetServiceRates(namespace, window) },
+		func() (json.RawMessage, error) { return s.promClient.GetServiceRates(ctx, namespace, window) },
+		func() (json.RawMessage, error) { return s.promClient.GetServiceRPCLatency(ctx, namespace, window, "0.95") },
 	)
 	httpData, rpcData, flowData, outFlowData := results[0], results[1], results[2], results[3]
 	dbRateData, dbLatData, latData, errData := results[4], results[5], results[6], results[7]
-	httpLatData, srvLatData, srvRatesRaw := results[8], results[9], results[10]
+	httpLatData, srvLatData, srvRatesRaw, rpcLatData := results[8], results[9], results[10], results[11]
+
+	serverLatencies := make(map[string]float64)
 
 	// 1. Layer 1: L7 Outbound Client Metrics from Prometheus (HTTP)
 	if len(httpData) > 0 {
@@ -191,7 +173,7 @@ func (s *TopologyService) buildEdges(
 		}
 	}
 
-	// 3. Layer 2: eBPF Network Flow Metrics from Beyla (Prometheus)
+	// 3. Layer 2: eBPF Network Flow Metrics from OBI (Prometheus)
 	// Captures ALL protocol network flows (TCP, RESP, DBs, uninstrumented clients)
 	if len(flowData) > 0 {
 		s.processFlows(flowData, namespace, ipToService, svcProtocols, nodeMap, getOrCreate, edgeKey, edgeMap)
@@ -296,9 +278,37 @@ func (s *TopologyService) buildEdges(
 		for _, r := range parseMetricEntries(httpLatData) {
 			svc := prometheus.MetricServiceName(r.Metric)
 			lat := parseRateValue(r.Value)
-			if lat > 0 {
+			if svc != "" && lat > 0 {
+				if existing, exists := serverLatencies[svc]; exists && existing > 0 {
+					if lat >= 10.0 && existing < 10.0 {
+						continue
+					}
+				}
+				serverLatencies[svc] = lat
 				for _, e := range edgeMap {
-					if e.target == svc && (e.targetNamespace == "" || e.targetNamespace == namespace) && e.latencyP95 == 0 {
+					if e.target == svc && (e.targetNamespace == "" || e.targetNamespace == namespace) && (e.latencyP95 == 0 || (e.latencyP95 >= 10.0 && lat < 10.0)) {
+						e.latencyP95 = lat
+						e.latencySource = models.SourceMetrics
+					}
+				}
+			}
+		}
+	}
+
+	// 7b. Query Server Latency for inbound gRPC callers
+	if len(rpcLatData) > 0 {
+		for _, r := range parseMetricEntries(rpcLatData) {
+			svc := prometheus.MetricServiceName(r.Metric)
+			lat := parseRateValue(r.Value)
+			if svc != "" && lat > 0 {
+				if existing, exists := serverLatencies[svc]; exists && existing > 0 {
+					if lat >= 10.0 && existing < 10.0 {
+						continue
+					}
+				}
+				serverLatencies[svc] = lat
+				for _, e := range edgeMap {
+					if e.target == svc && (e.targetNamespace == "" || e.targetNamespace == namespace) && (e.latencyP95 == 0 || (e.latencyP95 >= 10.0 && lat < 10.0)) {
 						e.latencyP95 = lat
 						e.latencySource = models.SourceMetrics
 					}
@@ -408,11 +418,12 @@ func (s *TopologyService) buildEdges(
 			Rate:          e.rate,
 			ErrorRate:     e.errorRate,
 			LatencyP95:    e.latencyP95,
+			BytesRate:     e.bytesRate,
 			RateSource:    e.rateSource,
 			LatencySource: e.latencySource,
 		})
 		edgeID++
 	}
 
-	return edges, nil
+	return edges, serverLatencies, nil
 }

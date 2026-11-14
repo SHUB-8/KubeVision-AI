@@ -10,7 +10,7 @@ export interface HealthResponse {
  * Where a number came from. A p95 computed from a handful of sampled spans and
  * a histogram_quantile over every request on the wire are not the same evidence
  * and must not look identical on screen.
- *   metrics   - measured by eBPF/Beyla, read from Prometheus (full request stream)
+ *   metrics   - measured by eBPF/OBI, read from Prometheus (full request stream)
  *   traces    - derived by the backend from sampled Tempo spans
  *   estimated - borrowed from a peer's measured rate, not observed on this edge
  * Absent (undefined) means "no data" and must render as such, never as 0.
@@ -31,6 +31,7 @@ export interface Node {
   rate?: number;
   errorRate?: number;
   latencyP95?: number;
+  bytesRate?: number;
   rateSource?: MetricSource;
   latencySource?: MetricSource;
   labels?: Record<string, string>;
@@ -44,6 +45,7 @@ export interface Edge {
   rate?: number;
   errorRate?: number;
   latencyP95?: number;
+  bytesRate?: number;
   rateSource?: MetricSource;
   latencySource?: MetricSource;
   /** True on links from the static fallback map (no peer telemetry). */
@@ -90,8 +92,9 @@ export interface Span {
   traceId: string;
   spanId: string;
   parentSpanId?: string;
+  kind?: string;
   /**
-   * True when the original parent span was never exported (Beyla's per-
+   * True when the original parent span was never exported (OBI's per-
    * connection context limitation on multiplexed HTTP/2/gRPC) and the backend
    * re-attached this span to its caller's hosting span by time-window
    * adjacency. The link is an inference and must render differently from an
@@ -112,6 +115,10 @@ export interface Span {
   startTime: number;
   duration: number; // in nanoseconds or microseconds
   statusCode: string;
+  /** OTLP status.message — the recorded failure reason, when the tracer had one. */
+  statusMessage?: string;
+  podName?: string;
+  nodeName?: string;
   attributes?: Record<string, string>;
 }
 
@@ -130,6 +137,20 @@ export interface LogEntry {
   stream: string;
   labels?: Record<string, string>;
   line: string;
+}
+
+export interface TraceLogEntry extends LogEntry {
+  /** Service that emitted the line, when the pod could be mapped to a workload. */
+  service?: string;
+}
+
+/** Logs emitted by every service participating in one trace, around its window. */
+export interface TraceLogs {
+  traceId: string;
+  services: string[];
+  startNs: number;
+  endNs: number;
+  entries: TraceLogEntry[];
 }
 
 export interface KubernetesEvent {
@@ -156,6 +177,22 @@ export interface PodInfo {
   ip: string;
   restarts: number;
   age: string;
+  workloadName?: string;
+  cpuUsageCores?: number;
+  cpuLimitCores?: number;
+  memoryUsageBytes?: number;
+  memoryLimitBytes?: number;
+}
+
+export interface PVCInfo {
+  name: string;
+  namespace: string;
+  status: string;
+  volumeName?: string;
+  capacity?: string;
+  storageClass?: string;
+  accessModes?: string[];
+  age?: string;
 }
 
 export interface ClusterInfo {
@@ -164,6 +201,17 @@ export interface ClusterInfo {
   node: string;
   status: string;
   pods?: PodInfo[];
+  pvcs?: PVCInfo[];
+  cpuUsageCores?: number;
+  cpuTotalCores?: number;
+  memoryUsageBytes?: number;
+  memoryTotalBytes?: number;
+}
+
+export interface LogVolumeBucket {
+  timestamp: number;
+  total: number;
+  errors: number;
 }
 
 export interface ThresholdSettings {

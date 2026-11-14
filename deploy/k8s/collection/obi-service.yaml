@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: beyla
+  name: obi
   namespace: monitoring
   labels:
-    app: beyla
+    app: obi
 spec:
   selector:
-    app: beyla
+    app: obi
   ports:
     - name: metrics
       port: 8999

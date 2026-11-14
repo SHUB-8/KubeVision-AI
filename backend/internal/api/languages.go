@@ -24,7 +24,7 @@ import (
 func (h *Handlers) serviceLanguages(ctx context.Context, namespace string) map[string]string {
 	var fromMetrics map[string]string
 	if h.promClient != nil {
-		languages, err := h.promClient.GetServiceLanguages(namespace)
+		languages, err := h.promClient.GetServiceLanguages(ctx, namespace)
 		if err != nil {
 			slog.Warn("target_info language query failed", "namespace", namespace, "error", err)
 		} else {

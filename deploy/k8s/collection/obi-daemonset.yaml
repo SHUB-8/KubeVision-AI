@@ -24,7 +24,7 @@
 # - Env vars: OBI reads ONLY the OTEL_EBPF_* prefix (Beyla accepted BEYLA_* too).
 # - Config file schema is unchanged (discovery/routes v1 YAML still documented at
 #   devdocs/config/CONFIG.md in the OBI repo); the file is renamed for accuracy
-#   and lives in beyla-configmap.yaml.
+#   and lives in obi-configmap.yaml.
 # - Exported METRIC NAMES change prefix: beyla_* -> obi_* (e.g. the network flow
 #   metrics queried by the backend). Backend PromQL was updated in the same change.
 #
@@ -32,41 +32,48 @@
 # - v1.0.0 (2026-10-30) is the project's first stable release and the start of
 #   the v1 compatibility contract (config, documented env vars, stable telemetry).
 #   Image tag is the only change here.
-# - Config v1 (the discovery:/routes: file in beyla-configmap.yaml) REMAINS
+# - Config v1 (the discovery:/routes: file in obi-configmap.yaml) REMAINS
 #   SUPPORTED and is frozen; Config v2 is the forward-looking format. No config
 #   migration is required for this bump - do it deliberately later via
 #   `obi config migrate` if/when v2-specific features are needed.
 # - Known v1.0 limitation: application metrics can stay missing after an observed
 #   Pod starts/restarts until OBI itself restarts. After rolling boutique, check
-#   the RED series; if absent, `kubectl -n monitoring rollout restart ds/beyla`.
+#   the RED series; if absent, `kubectl -n monitoring rollout restart ds/obi`.
 # - Keep the attach-order rule: restart OBI BEFORE restarting observed workloads,
 #   so its HPACK/context state observes connections from their first byte.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: beyla
+  name: obi
   namespace: monitoring
 spec:
   selector:
     matchLabels:
-      app: beyla
+      app: obi
   template:
     metadata:
       labels:
-        app: beyla
+        app: obi
     spec:
       hostPID: true
       hostNetwork: true
-      serviceAccountName: beyla
+      serviceAccountName: obi
       # Use ClusterFirstWithHostNet so the hostNetwork pod automatically uses
       # the in-cluster DNS resolver across any provider (K3s, EKS, GKE, AKS, bare-metal).
       dnsPolicy: ClusterFirstWithHostNet
       tolerations:
         - operator: Exists
       containers:
-        - name: beyla
+        - name: obi
           image: otel/ebpf-instrument:v1.0.0
           imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 100m
+              memory: 200Mi
+            limits:
+              cpu: 500m
+              memory: 500Mi
           securityContext:
             privileged: true
             capabilities:
@@ -165,7 +172,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: beyla-config
+            name: obi-config
         - name: var-run
           hostPath:
             path: /var/run/

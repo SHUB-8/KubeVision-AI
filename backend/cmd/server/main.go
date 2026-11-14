@@ -28,7 +28,7 @@ import (
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080"
+		port = "8090"
 	}
 
 	promURL := os.Getenv("PROMETHEUS_URL")
@@ -143,7 +143,7 @@ func main() {
 		}()
 	}
 
-	router := api.SetupRoutes(store, k8sClient, promClient, lokiClient, tempoClient, api.RouteConfig{
+	router := api.SetupRoutes(runCtx, store, k8sClient, promClient, lokiClient, tempoClient, api.RouteConfig{
 		DefaultNamespace:   defaultNamespace,
 		ObservedNamespaces: observedNamespaces,
 		APIToken:           apiToken,

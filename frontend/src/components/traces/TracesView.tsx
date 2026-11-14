@@ -3,15 +3,16 @@ import { useApp } from '../../context/AppContext';
 import { api } from '../../services/api';
 import { Trace } from '../../types/api';
 import { TraceWaterfall } from './TraceWaterfall';
-import { traceDurationMs, traceSpanCount, traceStartNs } from '../../lib/trace';
+import { traceDurationMs, traceSpanCount, traceStartNs, traceHasError } from '../../lib/trace';
 import { formatMs, formatAge } from '../../lib/format';
 import { LoadingSpinner } from '../common/LoadingSpinner';
 import { EmptyState } from '../common/EmptyState';
 import {
   Search,
   ChevronRight,
-  RefreshCw,
   AlertTriangle,
+  Copy,
+  Check,
 } from 'lucide-react';
 
 const MIN_DURATIONS = [
@@ -46,14 +47,22 @@ export const TracesView: React.FC = () => {
 
   // Client-side result filters: error spans only, and a minimum duration.
   const [errorsOnly, setErrorsOnly] = useState<boolean>(false);
+  // Server-side Tempo status filter. The client-side "Errors" toggle only
+  // inspects the newest N traces, so a low error rate can be invisible; a
+  // seeded pivot asks Tempo for failing traces directly.
+  const [statusFilter, setStatusFilter] = useState<'' | 'error'>('');
   const [minDurMs, setMinDurMs] = useState<number>(0);
   // One-shot seed: a cross-view navigation (e.g. topology "Slow traces") may
   // preset the minimum-duration filter. Apply once, then clear.
   useEffect(() => {
     if (traceSeed?.minDurationMs !== undefined) {
       setMinDurMs((prev) => Math.max(prev, traceSeed.minDurationMs ?? 0));
-      setTraceSeed(null);
     }
+    if (traceSeed?.status === 'error') {
+      setStatusFilter('error');
+      setErrorsOnly(true);
+    }
+    if (traceSeed) setTraceSeed(null);
   }, [traceSeed, setTraceSeed]);
 
   // Service names for the search autocomplete (datalist), from the services API.
@@ -62,6 +71,15 @@ export const TracesView: React.FC = () => {
   // Active deep-dive trace
   const [activeTrace, setActiveTrace] = useState<Trace | null>(null);
   const [loadingDetail, setLoadingDetail] = useState<boolean>(false);
+
+  // Which row's trace ID was just copied, so only that row's icon swaps.
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const copyTraceId = (traceId: string) => {
+    navigator.clipboard.writeText(traceId);
+    setCopiedId(traceId);
+    setTimeout(() => setCopiedId((current) => (current === traceId ? null : current)), 2000);
+  };
 
   const requestSeq = useRef(0);
   const isFirstRender = useRef(true);
@@ -76,7 +94,13 @@ export const TracesView: React.FC = () => {
     setError(null);
     const seq = ++requestSeq.current;
     try {
-      const data = await api.getTraces(debouncedService || undefined, limit, timeWindow || undefined);
+      const data = await api.getTraces(
+        debouncedService || undefined,
+        limit,
+        timeWindow || undefined,
+        statusFilter || undefined,
+        minDurMs > 0 ? minDurMs : undefined
+      );
       if (seq !== requestSeq.current) return;
       setTraces(data);
     } catch (err: any) {
@@ -94,12 +118,12 @@ export const TracesView: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedService]);
 
-  // Filter/limit/window changes reload visibly; the auto-refresh tick refetches
+  // Filter/limit/window/minDuration changes reload visibly; the auto-refresh tick refetches
   // in the background so the table never flashes back to a spinner.
   useEffect(() => {
     fetchTraces();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedService, limit, timeWindow]);
+  }, [debouncedService, limit, timeWindow, statusFilter, minDurMs]);
 
   useEffect(() => {
     if (isFirstRender.current) {
@@ -121,7 +145,7 @@ export const TracesView: React.FC = () => {
   const displayedTraces = useMemo(
     () =>
       traces.filter((t) => {
-        if (errorsOnly && !(t.spans ?? []).some((s) => s.statusCode && !s.statusCode.includes('OK'))) {
+        if (errorsOnly && !traceHasError(t)) {
           return false;
         }
         if (minDurMs > 0) {
@@ -193,7 +217,11 @@ export const TracesView: React.FC = () => {
 
         <div className="flex items-center gap-3 w-full sm:w-auto justify-end text-xs font-mono">
           <button
-            onClick={() => setErrorsOnly((v) => !v)}
+            onClick={() => {
+              const next = !errorsOnly;
+              setErrorsOnly(next);
+              if (!next) setStatusFilter('');
+            }}
             className={`flex items-center gap-1 px-2.5 py-1.5 rounded-md border text-[11px] font-medium transition ${
               errorsOnly
                 ? 'bg-rose-500/15 border-rose-500/40 text-rose-300'
@@ -226,16 +254,26 @@ export const TracesView: React.FC = () => {
             <option value={25}>25 Traces</option>
             <option value={50}>50 Traces</option>
           </select>
-
-          <button
-            onClick={() => fetchTraces()}
-            className="p-2 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition"
-            title="Refresh Traces"
-          >
-            <RefreshCw className="w-4 h-4" />
-          </button>
         </div>
       </div>
+
+      {statusFilter === 'error' && (
+        <div className="flex items-center justify-between gap-3 px-3 py-2 rounded-md border border-rose-500/40 bg-rose-500/10 text-[11px] text-rose-200">
+          <span>
+            Showing only traces Tempo marks as failing for this service — errors at this rate
+            usually exist as span/status evidence, not as log lines.
+          </span>
+          <button
+            onClick={() => {
+              setStatusFilter('');
+              setErrorsOnly(false);
+            }}
+            className="shrink-0 font-semibold text-rose-300 hover:text-rose-100 transition"
+          >
+            Show all
+          </button>
+        </div>
+      )}
 
       {/* Traces List Table */}
       {loading ? (
@@ -254,13 +292,22 @@ export const TracesView: React.FC = () => {
             traces.length > 0
               ? 'Traces were found in this window, but none match the error/duration filters. Loosen them or widen the time window.'
               : serviceFilter
-                ? `No traces found for service "${serviceFilter}". Try clearing the filter.`
+                ? statusFilter === 'error'
+                  ? `No failing traces found for service "${serviceFilter}". The service may have recovered or errors occurred outside this window.`
+                  : `No traces found for service "${serviceFilter}". Try clearing the filter.`
                 : 'No traces captured in this time window. Make sure the services are receiving traffic.'
           }
-          actionText={traces.length > 0 ? 'Reset Filters' : serviceFilter ? 'Clear Filter' : 'Refresh'}
+          actionText={
+            traces.length > 0 || statusFilter === 'error' || minDurMs > 0
+              ? 'Reset Filters'
+              : serviceFilter
+                ? 'Clear Filter'
+                : 'Refresh'
+          }
           onAction={() => {
-            if (traces.length > 0) {
+            if (traces.length > 0 || statusFilter === 'error' || minDurMs > 0) {
               setErrorsOnly(false);
+              setStatusFilter('');
               setMinDurMs(0);
             } else if (serviceFilter) {
               setServiceFilter('');
@@ -275,6 +322,9 @@ export const TracesView: React.FC = () => {
             <table className="w-full text-left text-xs font-mono">
               <thead className="bg-slate-800/60 text-slate-400 border-b border-slate-800 text-[10px] uppercase tracking-wider">
                 <tr>
+                  <th className="p-4 text-center">
+                    <span className="sr-only">Status</span>
+                  </th>
                   <th className="p-4">Time</th>
                   <th className="p-4">Root Service</th>
                   <th className="p-4">Operation / Endpoint</th>
@@ -288,12 +338,21 @@ export const TracesView: React.FC = () => {
                 {displayedTraces.map((t) => {
                   const startNs = traceStartNs(t);
                   const startMs = startNs !== null ? startNs / 1_000_000 : null;
+                  const hasError = traceHasError(t);
                   return (
                   <tr
                     key={t.traceId}
                     onClick={() => loadTraceDetail(t.traceId)}
                     className="hover:bg-slate-800/40 cursor-pointer transition group"
                   >
+                    <td className="p-4 text-center">
+                      <span
+                        className={`inline-block h-2 w-2 rounded-full ${hasError ? 'bg-rose-500' : 'bg-emerald-500'}`}
+                        role="img"
+                        aria-label={hasError ? 'Contains an error span' : 'No error spans'}
+                        title={hasError ? 'Contains an error span' : 'No error spans'}
+                      />
+                    </td>
                     <td
                       className="p-4 text-slate-300 whitespace-nowrap"
                       title={startMs !== null ? new Date(startMs).toLocaleString() : undefined}
@@ -313,11 +372,43 @@ export const TracesView: React.FC = () => {
                         </span>
                       )}
                     </td>
-                    <td className="p-4 text-slate-200 font-medium truncate max-w-xs" title={t.rootTraceName}>
-                      {t.rootTraceName || '/'}
+                    <td className="p-4 text-slate-200 font-medium max-w-xs">
+                      <div className="truncate" title={t.rootTraceName}>
+                        {t.rootTraceName || '/'}
+                      </div>
+                      {(() => {
+                        const failure = (t.spans ?? []).find(
+                          (s) => s.statusMessage && s.statusCode && !s.statusCode.includes('OK')
+                        );
+                        return failure?.statusMessage ? (
+                          <div
+                            className="mt-1 text-[10px] font-normal text-rose-400/90 truncate"
+                            title={failure.statusMessage}
+                          >
+                            ⚠ {failure.statusMessage}
+                          </div>
+                        ) : null;
+                      })()}
                     </td>
-                    <td className="p-4 text-slate-400 truncate max-w-[180px]">
-                      {t.traceId}
+                    <td className="p-4 text-slate-400">
+                      <div className="flex items-center gap-1.5 max-w-[200px]">
+                        <span className="min-w-0 truncate">{t.traceId}</span>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            copyTraceId(t.traceId);
+                          }}
+                          className="shrink-0 p-1 rounded-sm hover:text-cyan-400 hover:bg-slate-800 transition"
+                          title="Copy Trace ID"
+                          aria-label={`Copy trace ID ${t.traceId}`}
+                        >
+                          {copiedId === t.traceId ? (
+                            <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          ) : (
+                            <Copy className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      </div>
                     </td>
                     <td className="p-4 text-right font-bold text-slate-200">
                       {formatMs(traceDurationMs(t))}

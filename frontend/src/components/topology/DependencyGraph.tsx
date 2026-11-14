@@ -14,7 +14,9 @@ import {
 } from '@xyflow/react';
 import { useApp } from '../../context/AppContext';
 import { api } from '../../services/api';
+import { analyzeTopologyCascade, type TopologyCascade } from '../../lib/topologyCascade';
 import type { MetricSource } from '../../types/api';
+import { formatBytesRate } from '../../lib/format';
 import { ServiceNode } from './ServiceNode';
 
 // Dagre layered layout with responsive direction and viewport-adaptive spacing.
@@ -142,12 +144,8 @@ import { LoadingSpinner } from '../common/LoadingSpinner';
 import { EmptyState } from '../common/EmptyState';
 import {
   Search,
-  Filter,
-  Maximize2,
-  RefreshCw,
   Zap,
-  Layers,
-  ArrowRight,
+  AlertTriangle,
 } from 'lucide-react';
 
 const nodeTypes: any = {
@@ -155,15 +153,16 @@ const nodeTypes: any = {
 };
 
 export const DependencyGraph: React.FC = () => {
-  const { activeNamespace, timeWindow, refreshCount } = useApp();
+  const { activeNamespace, timeWindow, refreshCount, setSelectedService, setTraceSeed, setActiveTab } = useApp();
   const [nodes, setNodes, onNodesChange] = useNodesState<any>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<any>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [cascade, setCascade] = useState<TopologyCascade | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [filterQuery, setFilterQuery] = useState<string>('');
-  const [layoutDirection, setLayoutDirection] = useState<'LR' | 'TB'>('LR');
+  const [, setLayoutDirection] = useState<'LR' | 'TB'>('LR');
   // Edge traffic animation: edges with a measured request rate animate by
   // default (the pre-existing behavior); the toggle switches motion off.
   const [showTrafficAnim, setShowTrafficAnim] = useState<boolean>(true);
@@ -201,6 +200,16 @@ export const DependencyGraph: React.FC = () => {
 
       const rawNodes = topoData.nodes || [];
       const rawEdges = topoData.edges || [];
+      // Attribute on the same effective values the nodes render with: the
+      // topology payload omits a zero rate, so a node can still show an error
+      // rate sourced from the services endpoint. Analysing only the raw nodes
+      // made the strip undercount the failing services the badges displayed.
+      const effectiveNodes = rawNodes.map((node) => ({
+        ...node,
+        errorRate: node.errorRate ?? serviceMap.get(node.id)?.errorRate,
+      }));
+      const cascadeInfo = analyzeTopologyCascade(effectiveNodes, rawEdges);
+      setCascade(cascadeInfo);
 
       // A refresh must not reshuffle the graph: layout (and the auto
       // LR/TB choice) recompute only when the node/edge STRUCTURE changes.
@@ -230,15 +239,8 @@ export const DependencyGraph: React.FC = () => {
       // Isolated services (no peer telemetry) are moved out of the flow
       // columns by computeLayoutMap — a disconnected node mid-column reads
       // as a layout bug.
-      const connectedSet = new Set<string>();
-      rawEdges.forEach((e) => {
-        connectedSet.add(e.source);
-        connectedSet.add(e.target);
-      });
-      const orphans = rawNodes.filter((n) => !connectedSet.has(n.id));
-      const orphanSet = new Set(orphans.map((n) => n.id));
 
-            const flowNodes: FlowNode[] = rawNodes.map((node) => {
+      const flowNodes: FlowNode[] = rawNodes.map((node) => {
         const svc = serviceMap.get(node.id);
         const pos = positions.get(node.id) ?? { x: 0, y: 0 };
 
@@ -269,9 +271,23 @@ export const DependencyGraph: React.FC = () => {
             rate,
             errorRate: node.errorRate ?? svc?.errorRate ?? undefined,
             latencyP95,
+            bytesRate: node.bytesRate,
             rateSource,
             latencySource,
             status: svc?.status || 'Running',
+            errorRole: cascadeInfo.roles.get(node.id),
+            errorCause: cascadeInfo.cause.get(node.id),
+            onFocusCause: cascadeInfo.cause.get(node.id)
+              ? () => setSelectedNodeId(cascadeInfo.cause.get(node.id)!)
+              : undefined,
+            onFailingTraces:
+              node.type === 'service'
+                ? () => {
+                    setSelectedService(node.id);
+                    setTraceSeed({ status: 'error' });
+                    setActiveTab('traces');
+                  }
+                : undefined,
             replicas: svc?.replicas,
             ready: svc?.ready,
           },
@@ -279,8 +295,18 @@ export const DependencyGraph: React.FC = () => {
       });
 
       const flowEdges: FlowEdge[] = rawEdges.map((edge) => {
-        const hasErrors = (edge.errorRate || 0) > 0.01;
-        const strokeColor = edge.inferred ? '#475569' : hasErrors ? '#f43f5e' : '#06b6d4';
+        const edgeErrorRate = edge.errorRate || 0;
+        const hasErrors = edgeErrorRate > 0;
+        // The edge that lands on the origin is the failing call itself; the ones
+        // that merely carry someone else's error outward are drawn subordinate.
+        const isCauseEdge = hasErrors && cascadeInfo.roles.get(edge.target) === 'origin';
+        const strokeColor = edge.inferred
+          ? '#475569'
+          : isCauseEdge
+            ? '#f43f5e'
+            : hasErrors
+              ? '#fb7185'
+              : '#06b6d4';
 
         let edgeLabel = '';
         if (edge.inferred) {
@@ -294,6 +320,7 @@ export const DependencyGraph: React.FC = () => {
             parts.push(`${edge.rate.toFixed(1)} req/s${edge.rateSource === 'estimated' ? ' (est.)' : ''}`);
           }
           if (edge.latencyP95 && edge.latencyP95 > 0) parts.push(`${(edge.latencyP95 * 1000).toFixed(1)}ms`);
+          if (edge.bytesRate && edge.bytesRate > 0) parts.push(formatBytesRate(edge.bytesRate));
           if (edge.errorRate && edge.errorRate > 0) parts.push(`${(edge.errorRate * 100).toFixed(1)}% err`);
           edgeLabel = parts.join(' • ');
         }
@@ -310,7 +337,7 @@ export const DependencyGraph: React.FC = () => {
           animated: showTrafficAnim && !edge.inferred && (edge.rate || 0) > 0,
           style: {
             stroke: strokeColor,
-            strokeWidth: hasErrors ? 2.5 : 1.8,
+            strokeWidth: isCauseEdge ? 2.5 : hasErrors ? 2 : 1.8,
             strokeDasharray: edge.inferred ? '2 4' : undefined,
           },
           // Protocol/rate labels render on every edge (user preference) —
@@ -367,7 +394,17 @@ export const DependencyGraph: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [activeNamespace, timeWindow, setNodes, setEdges, getContainerSize]);
+  }, [
+    activeNamespace,
+    timeWindow,
+    setNodes,
+    setEdges,
+    getContainerSize,
+    showTrafficAnim,
+    setSelectedService,
+    setTraceSeed,
+    setActiveTab,
+  ]);
 
   useEffect(() => {
     fetchTopologyData();
@@ -478,7 +515,7 @@ export const DependencyGraph: React.FC = () => {
           </div>
           <div className="flex items-center gap-1.5">
             <span className="w-4 h-0 border-t-2 border-rose-500" />
-            <span className="text-slate-300">Errors (&gt;1%)</span>
+            <span className="text-slate-300">Errors</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="w-4 h-0 border-t-2 border-dashed border-slate-500" />
@@ -500,6 +537,39 @@ export const DependencyGraph: React.FC = () => {
           <span>{showTrafficAnim ? 'Traffic: On' : 'Traffic: Off'}</span>
         </button>
       </div>
+
+      {/* Cascade strip: one line, only when the graph actually reports errors.
+          Saying "9 failing" without saying which one started it is what made the
+          topology useless for a chain like checkout -> payment. */}
+      {cascade && cascade.failing.size > 0 && (
+        <div className="absolute top-16 left-4 z-20 flex max-w-[min(56rem,calc(100%-2rem))] flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-rose-500/30 bg-slate-950/95 px-3 py-1.5 text-[11px] font-mono text-rose-200">
+          <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+          {cascade.chains.length > 0 ? (
+            <span
+              className="truncate"
+              title={`Cascade: ${cascade.chains[0].join(' → ')} (downstream cause last)`}
+            >
+              {cascade.chains[0].join(' → ')}
+            </span>
+          ) : (
+            <span>failing services</span>
+          )}
+          <span className="text-rose-300/60">
+            {cascade.failing.size} failing
+            {cascade.chains.length > 1 ? ` · ${cascade.chains.length} chains` : ''}
+          </span>
+          <button
+            onClick={() => {
+              const originId = cascade.chains[0]?.[cascade.chains[0].length - 1] ?? [...cascade.failing.keys()][0];
+              if (originId) setSelectedNodeId(originId);
+            }}
+            className="ml-auto shrink-0 rounded-sm border border-rose-500/30 px-2 py-0.5 text-rose-300 hover:bg-rose-500/10 hover:text-rose-200 transition-colors"
+            title="Open the service where the failure started"
+          >
+            Focus cause
+          </button>
+        </div>
+      )}
 
       {/* React Flow Viewport */}
       <div ref={containerRef} className="flex-1 w-full h-full relative">
@@ -531,7 +601,7 @@ export const DependencyGraph: React.FC = () => {
           >
             <Background color="#1e293b" gap={24} size={1} />
             {orphanCount > 0 && (
-              <Panel position="bottom-center" className="!text-[10px] font-mono text-slate-500">
+              <Panel position="bottom-center" className="!text-[10px] font-mono text-slate-400">
                 isolated · no eBPF peer telemetry
               </Panel>
             )}
@@ -554,17 +624,22 @@ export const DependencyGraph: React.FC = () => {
       {/* Side Detail Panel */}
       {(() => {
         const selected = nodes.find((node) => node.id === selectedNodeId);
-        if (!selected || selected.data?.type !== 'service') return null;
+        if (!selected) return null;
         return (
           <NodeDetailPanel
-            serviceName={selected.id}
+            serviceName={selected.data?.label || selected.id}
+            nodeType={selected.data?.type}
             onClose={() => setSelectedNodeId(null)}
             language={selected.data?.language}
             stats={{
               errorRate: selected.data?.errorRate,
               latencyP95: selected.data?.latencyP95,
               rate: selected.data?.rate,
+              bytesRate: selected.data?.bytesRate,
             }}
+            errorRole={selected.data?.errorRole}
+            causeName={selected.data?.errorCause}
+            onFocusCause={selected.data?.onFocusCause}
           />
         );
       })()}

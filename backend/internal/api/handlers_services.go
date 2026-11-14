@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/gin-gonic/gin"
+	"github.com/kubevision/backend/internal/clients/k8s"
 	prometheus "github.com/kubevision/backend/internal/clients/prometheus"
 	"github.com/kubevision/backend/models"
 	"log/slog"
@@ -39,7 +40,7 @@ func (h *Handlers) GetServices(c *gin.Context) {
 	}
 
 	serveCachedJSON(c, "services:"+namespace+":"+window, 5*time.Second, func() (any, error) {
-		pods, err := h.k8sClient.GetPods(namespace)
+		pods, err := h.k8sClient.GetPods(c.Request.Context(), namespace)
 		if err != nil {
 			return nil, err
 		}
@@ -51,7 +52,7 @@ func (h *Handlers) GetServices(c *gin.Context) {
 		for _, pod := range pods {
 			svcName := pod.WorkloadName
 			if svcName == "" {
-				svcName = extractServiceName(pod.Name)
+				svcName = k8s.ExtractServiceName(pod.Name)
 			}
 			counts := phaseCounts[svcName]
 			switch pod.Status {
@@ -86,20 +87,25 @@ func (h *Handlers) GetServices(c *gin.Context) {
 		// in the window) just leaves the zero value; a Prometheus error degrades
 		// the enrichment only.
 		if h.promClient != nil {
+			reqCtx := c.Request.Context()
 			results := prometheus.FetchParallel(
-				func() (json.RawMessage, error) { return h.promClient.GetServiceRates(namespace, window) },
-				func() (json.RawMessage, error) { return h.promClient.GetServiceErrors(namespace, window) },
-				func() (json.RawMessage, error) { return h.promClient.GetServiceRPCErrors(namespace, window) },
-				func() (json.RawMessage, error) { return h.promClient.GetServiceLatency(namespace, window, "0.95") },
-				func() (json.RawMessage, error) { return h.promClient.GetServiceRPCLatency(namespace, window, "0.95") },
+				func() (json.RawMessage, error) { return h.promClient.GetServiceRates(reqCtx, namespace, window) },
+				func() (json.RawMessage, error) { return h.promClient.GetServiceErrors(reqCtx, namespace, window) },
+				func() (json.RawMessage, error) { return h.promClient.GetServiceRPCErrors(reqCtx, namespace, window) },
+				func() (json.RawMessage, error) { return h.promClient.GetServiceLatency(reqCtx, namespace, window, "0.95") },
+				func() (json.RawMessage, error) { return h.promClient.GetServiceRPCLatency(reqCtx, namespace, window, "0.95") },
 				func() (json.RawMessage, error) {
-					return h.promClient.GetClientLatencyByServer(namespace, window, "0.95")
+					return h.promClient.GetClientLatencyByServer(reqCtx, namespace, window, "0.95")
 				},
-				func() (json.RawMessage, error) { return h.promClient.GetClientErrorsByServer(namespace, window) },
+				func() (json.RawMessage, error) { return h.promClient.GetClientErrorsByServer(reqCtx, namespace, window) },
 			)
 			for _, r := range parseMetricEntries(results[0]) {
 				if svc, ok := serviceMap[prometheus.MetricServiceName(r.Metric)]; ok {
-					setServiceRate(svc, entryValue(r), models.SourceMetrics)
+					val := entryValue(r)
+					if svc.Rate > 0 && val < svc.Rate {
+						continue
+					}
+					setServiceRate(svc, val, models.SourceMetrics)
 				}
 			}
 			for _, r := range parseMetricEntries(results[1]) {
@@ -116,12 +122,22 @@ func (h *Handlers) GetServices(c *gin.Context) {
 			}
 			for _, r := range parseMetricEntries(results[3]) {
 				if svc, ok := serviceMap[prometheus.MetricServiceName(r.Metric)]; ok {
-					setServiceLatency(svc, entryValue(r), models.SourceMetrics)
+					lat := entryValue(r)
+					if svc.LatencyP95 > 0 && lat >= 10.0 && svc.LatencyP95 < 10.0 {
+						continue
+					}
+					setServiceLatency(svc, lat, models.SourceMetrics)
 				}
 			}
 			for _, r := range parseMetricEntries(results[4]) {
-				if svc, ok := serviceMap[prometheus.MetricServiceName(r.Metric)]; ok && svc.LatencyP95 == 0 {
-					setServiceLatency(svc, entryValue(r), models.SourceMetrics)
+				if svc, ok := serviceMap[prometheus.MetricServiceName(r.Metric)]; ok {
+					lat := entryValue(r)
+					if svc.LatencyP95 > 0 && lat >= 10.0 && svc.LatencyP95 < 10.0 {
+						continue
+					}
+					if svc.LatencyP95 == 0 || (svc.LatencyP95 >= 10.0 && lat < 10.0) {
+						setServiceLatency(svc, lat, models.SourceMetrics)
+					}
 				}
 			}
 			// For polyglot services and datastores whose server-side series carry
@@ -150,10 +166,26 @@ func (h *Handlers) GetServices(c *gin.Context) {
 		// Enrich services that have 0 inbound server metrics with their observed operational rates
 		// (e.g. client workloads generating outbound requests or databases handling queries)
 		if h.topologySvc != nil {
-			if topo, err := h.topologySvc.GetTopology(c.Request.Context(), namespace, window); err == nil {
+			var topo *models.Topology
+			topoKey := "topology:" + namespace + ":" + window
+			if entry, ok := responseCache.Load(topoKey); ok {
+				e := entry.(cachedResponseEntry)
+				if time.Now().Before(e.expires) {
+					var cachedTopo models.Topology
+					if err := json.Unmarshal(e.body, &cachedTopo); err == nil {
+						topo = &cachedTopo
+					}
+				}
+			}
+			if topo == nil {
+				if fetched, err := h.topologySvc.GetTopology(c.Request.Context(), namespace, window); err == nil {
+					topo = fetched
+				} else {
+					slog.Warn("service response topology enrichment failed", "namespace", namespace, "window", window, "error", err)
+				}
+			}
+			if topo != nil {
 				enrichMissingServiceRatesFromTopology(serviceMap, topo.Edges)
-			} else {
-				slog.Warn("service response topology enrichment failed", "namespace", namespace, "window", window, "error", err)
 			}
 		}
 
@@ -230,24 +262,4 @@ func deriveServiceStatus(running, pending, failed int) string {
 	default:
 		return "Unknown"
 	}
-}
-
-func extractServiceName(podName string) string {
-	parts := []rune(podName)
-	lastDash := -1
-	secondLastDash := -1
-	for i := len(parts) - 1; i >= 0; i-- {
-		if parts[i] == '-' {
-			if lastDash == -1 {
-				lastDash = i
-			} else if secondLastDash == -1 {
-				secondLastDash = i
-				break
-			}
-		}
-	}
-	if secondLastDash > 0 {
-		return string(parts[:secondLastDash])
-	}
-	return podName
 }
